@@ -1,0 +1,48 @@
+{
+  "name": "@assurance/core",
+  "version": "0.1.0",
+  "description": "Domain-independent core for governing what a body of knowledge accepts: proposals, assessments, assurance profiles, and the policy that decides when something may publish.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hagelien/assurance-core.git"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "example": "tsx examples/adr-log.ts"
+  },
+  "keywords": [
+    "governance",
+    "review",
+    "assurance",
+    "policy",
+    "provenance",
+    "knowledge-base"
+  ],
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.8"
+  }
+}

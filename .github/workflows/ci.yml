@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      # Covers src, tests AND examples. The example is the only thing in the
+      # repo that uses the package the way a consumer would, and it is written
+      # in the README as fact — an example that stops compiling is a README
+      # that lies.
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      # Runs the example for real. Typechecking proves it compiles; only
+      # running it proves the output quoted in the README is what it prints.
+      - name: Run the worked example
+        run: npm run example
+      # The package publishes from `dist`, so a failing build is a broken
+      # release even when every test passed against the sources. It compiles
+      # under tsconfig.build.json, which denies src/ any ambient Node types.
+      - name: Build
+        run: npm run build
