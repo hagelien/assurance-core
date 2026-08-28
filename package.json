@@ -1,5 +1,5 @@
 {
-  "name": "@assurance/core",
+  "name": "assurance-core",
   "version": "0.1.0",
   "description": "Domain-independent core for governing what a body of knowledge accepts: proposals, assessments, assurance profiles, and the policy that decides when something may publish.",
   "type": "module",

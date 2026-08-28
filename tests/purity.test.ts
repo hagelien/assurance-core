@@ -1,7 +1,7 @@
 /**
  * The package's central claim, asserted rather than described.
  *
- * `@assurance/core` is worth extracting only if it stays free of any one
+ * `assurance-core` is worth extracting only if it stays free of any one
  * host's world. That is easy to state in a README and easy to lose one
  * convenient import at a time, so it is checked here on every run.
  *

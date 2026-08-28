@@ -1,5 +1,5 @@
 /**
- * `@assurance/core` — the public surface.
+ * `assurance-core` — the public surface.
  *
  * This package answers one question: given who has assessed a proposed change
  * and what they concluded, may it publish yet? It knows how to count reviews,

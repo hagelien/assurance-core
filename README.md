@@ -1,4 +1,4 @@
-# @assurance/core
+# assurance-core
 
 Decide when a proposed change to a body of knowledge has been reviewed enough
 to publish — and be able to explain the answer afterwards.
@@ -8,7 +8,7 @@ well-attested a proposal is, applies a policy to that, and produces a decision
 record you can re-read a year later and still understand.
 
 ```
-npm install @assurance/core
+npm install assurance-core
 ```
 
 ## What it is
