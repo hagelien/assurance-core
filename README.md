@@ -134,6 +134,24 @@ already clean while its doc comments named the original host more than twenty
 times and pointed at files that do not exist in this repository. A comment
 describing a codebase the reader cannot open is worse than no comment.
 
+## Releasing
+
+Publishing is driven by GitHub releases. Bump `version` in `package.json`, land
+it, then publish a release whose tag is that version (`v0.1.0` or `0.1.0` —
+both are accepted). `.github/workflows/publish.yml` refuses a tag that does not
+match the version in the tree, so a release cannot ship one version under
+another's name.
+
+`prepublishOnly` runs typecheck, tests and build before the upload, so the gate
+travels with the package rather than living only in CI — a publish by hand from
+a laptop is held to the same bar. The workflow publishes with `--provenance`,
+which attaches a signed attestation tying the tarball to the workflow run and
+commit that produced it.
+
+It needs an `NPM_TOKEN` repository secret holding an npm automation token with
+publish rights. Until that exists the publish step fails rather than reporting
+a success it did not achieve.
+
 ## Status
 
 `0.1.0`, and honest about it: the API is in use but has been consumed by one

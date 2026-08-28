@@ -1,0 +1,61 @@
+name: publish
+
+# Publishes to npm when a GitHub release is published. `prepublishOnly` in
+# package.json runs typecheck, tests and build before the upload, so a tag can
+# never ship a tree that does not compile or pass — the gate lives in the
+# package rather than only in this file, which means it also protects a publish
+# run by hand from a laptop.
+#
+# Requires an `NPM_TOKEN` repository secret: an npm automation token with
+# publish rights. Without it the run fails loudly at the publish step rather
+# than succeeding having uploaded nothing.
+on:
+  release:
+    types: [published]
+  # Manual re-run, for a release whose publish failed on something transient.
+  # It republishes whatever is on the default branch, so the version guard
+  # below does not apply — npm itself refuses a version that already exists.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Lets `npm publish --provenance` mint a signed attestation linking the
+  # tarball to this workflow run and commit. A package about assurance should
+  # be able to show where its own artefact came from.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          # Points npm at the public registry and writes the auth token into
+          # the generated .npmrc. Without this, NODE_AUTH_TOKEN is ignored.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Tag must match package.json version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          tag=${TAG#v}
+          if [ "$pkg" != "$tag" ]; then
+            echo "Release tag '$TAG' does not match package.json version '$pkg'." >&2
+            echo "Bump the version and retag, rather than publishing one under the other's name." >&2
+            exit 1
+          fi
+          echo "Publishing $pkg from tag $TAG."
+
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
