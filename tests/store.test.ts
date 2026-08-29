@@ -38,6 +38,7 @@ function harnessFor(store: MemoryAssuranceStore): ConformanceHarness {
     targetType: 'note',
     otherSpace: 'other',
     otherTargetType: 'record',
+    supportsSupersededRulings: true,
     seed: {
       // The ids come back from the store, never down into it: see
       // `ConformanceSeed`. The reference store assigns them the way a host's
@@ -64,7 +65,7 @@ describe('the reference store satisfies the contract', () => {
     expect(conformanceFailures(results)).toEqual([]);
     // Non-vacuity: an empty suite reports no failures either.
     expect(results.length).toBe(STORE_CONFORMANCE_CHECKS.length);
-    expect(results.length).toBeGreaterThan(12);
+    expect(results.length).toBeGreaterThan(15);
   });
 
   it('gives each check a fresh store', async () => {

@@ -226,6 +226,10 @@ describe('a foreign store satisfies the port', () => {
     expect(skipped.map((line) => line.split(' — ')[0])).toEqual([
       'listOpenProposals filters by target type',
       'a proposal in another space is not listed',
+      // This host settles every dispute it rules on; it has no concept of one
+      // being replaced by another. Declaring support would be claiming a rule
+      // it cannot demonstrate.
+      'a superseded ruling leaves the dispute open',
     ]);
   });
 

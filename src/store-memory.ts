@@ -50,7 +50,7 @@ import type {
   StoredProposalVersion,
   Timestamp,
 } from './store.js';
-import { formatVersionRef, sameVersion } from './store.js';
+import { formatVersionRef, rulingClosesDispute, sameVersion } from './store.js';
 
 export interface SeedProposalInput {
   /**
@@ -310,10 +310,15 @@ export class MemoryAssuranceStore implements AssuranceStore {
       ruledAt: input.ruledAt,
     };
     this.rulings.push(record);
-    // The `open` flag is a projection over rulings: any ruling settles it.
-    // Recomputed rather than toggled, so replaying the rulings reproduces it.
+    // `open` is a projection over the rulings, recomputed rather than toggled
+    // so that replaying them reproduces it. `superseded` is the one ruling
+    // that does not close — a replacement dispute governs, and the objection
+    // is neither settled nor abandoned.
     const existing = this.disputeRecords[index]!;
-    this.disputeRecords[index] = { ...existing, open: false };
+    const closed = this.rulings
+      .filter((r) => r.disputeId === input.disputeId)
+      .some((r) => rulingClosesDispute(r.ruling));
+    this.disputeRecords[index] = { ...existing, open: !closed };
     return record;
   }
 

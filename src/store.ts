@@ -126,20 +126,53 @@ export interface StoredAssessment extends Assessment {
   readonly recordedAt: Timestamp;
 }
 
-/** A dispute, with the version it objects to. `open` is a projection over its rulings. */
+/**
+ * A dispute, with the version it objects to.
+ *
+ * `open` is a projection over its rulings — see `rulingClosesDispute` for
+ * which of them end it. Where the projection and the rulings disagree, the
+ * rulings are right.
+ */
 export interface StoredDispute extends DisputeState {
   readonly version: ProposalVersionRef;
   readonly openedAt: Timestamp;
 }
 
-/** How a dispute was settled. Appended; a dispute may carry several over its life. */
+/**
+ * How a dispute was settled. Appended; a dispute may carry several over its
+ * life.
+ *
+ * Three of the four close it. `superseded` alone does not, and that is the
+ * whole reason it is here: it records that another dispute took this one's
+ * place, so the replacement is what governs and this one is neither resolved
+ * nor abandoned. A host that folded it into `withdrawn` would be reporting a
+ * closed ruling on a dispute its own store still counts as open, and a caller
+ * reading the pair would see "withdrawn but open" — a state that says nothing.
+ *
+ * The vocabulary was three values until a host with the concept implemented
+ * the port and had nowhere to put it. That is the intended way for this
+ * interface to grow: a word earns a place here when a real store loses
+ * meaning without it, not when one might.
+ */
 export interface StoredDisputeRuling {
   readonly rulingId: string;
   readonly disputeId: string;
-  readonly ruling: 'upheld' | 'rejected' | 'withdrawn';
+  readonly ruling: 'upheld' | 'rejected' | 'withdrawn' | 'superseded';
   readonly ruledByRef: string;
   readonly rationale: string | null;
   readonly ruledAt: Timestamp;
+}
+
+/**
+ * Whether a ruling ends the dispute it was made on.
+ *
+ * The one place this distinction is written down, so a host and a caller
+ * cannot each decide it separately.
+ */
+export function rulingClosesDispute(
+  ruling: StoredDisputeRuling['ruling'],
+): boolean {
+  return ruling !== 'superseded';
 }
 
 /**

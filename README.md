@@ -209,12 +209,20 @@ a success it did not achieve.
 
 ## Status
 
-`0.2.0`, and honest about it. It adds the store port, the conformance suite,
-the review queue and the review packet — a larger addition than the core it
-joins. Two hosts use it: the reference work it was extracted from, and the ADR
-log in `examples/`. The second one is deliberately small, so "it fits two
-domains" is a real claim about a modest range rather than a large one. Expect
-the surface to move before `1.0`.
+`0.3.0`, and honest about it. `0.2.0` added the store port, the conformance
+suite, the review queue and the review packet — a larger addition than the core
+it joins. `0.3.0` widens one thing the first real adapter could not express: a
+dispute ruling may be `superseded`, meaning a replacement dispute now governs,
+and it is the one ruling that does **not** close. Folding it into `withdrawn`
+made a host report "withdrawn but open", which says nothing.
+
+That is the intended way for this interface to grow — a word earns a place
+when a real store loses meaning without it, not when one might.
+
+Two hosts use it: the reference work it was extracted from, and the ADR log in
+`examples/`. The second is deliberately small, so "it fits two domains" is a
+real claim about a modest range rather than a large one. Expect the surface to
+move before `1.0`.
 
 ## Licence
 

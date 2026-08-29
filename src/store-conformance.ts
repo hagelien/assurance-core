@@ -97,6 +97,13 @@ export interface ConformanceHarness {
   readonly otherSpace?: SpaceId;
   /** A second target type, when the host has one. Absent skips the type filter. */
   readonly otherTargetType?: TargetType;
+  /**
+   * True when the host models a dispute being *superseded* by another rather
+   * than settled. Absent skips that clause, reported as a skip: a host with no
+   * such concept cannot demonstrate the rule, and pretending otherwise would
+   * pass a check nothing exercised.
+   */
+  readonly supportsSupersededRulings?: boolean;
 }
 
 export interface ConformanceResult {
@@ -538,6 +545,48 @@ const CHECKS: readonly Check[] = [
         (await store.disputeRulings(dispute.disputeId)).length,
         1,
         'ruling count',
+      );
+    },
+  },
+  {
+    name: 'a superseded ruling leaves the dispute open',
+    async run(h) {
+      const { store, seed } = h;
+      if (!h.supportsSupersededRulings) {
+        throw new NotApplicable(
+          'the harness does not model a dispute being superseded by another',
+        );
+      }
+      // The one ruling that does not close. It says a replacement dispute now
+      // governs, so reporting it as closed would let publication proceed past
+      // an objection that is still live.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const { ref } = await seed.version({ proposalId });
+      const dispute = await store.openDispute({
+        version: ref,
+        openedByRef: 'user:2',
+        openedByKind: 'human',
+        openedAt: T0,
+      });
+      await store.ruleDispute({
+        disputeId: dispute.disputeId,
+        ruling: 'superseded',
+        ruledByRef: 'user:3',
+        ruledAt: T1,
+      });
+      equal(
+        (await store.disputes(ref))[0]!.open,
+        true,
+        'a superseded dispute stays open',
+      );
+      equal(
+        (await store.disputeRulings(dispute.disputeId))[0]!.ruling,
+        'superseded',
+        'the ruling keeps its own word',
       );
     },
   },
