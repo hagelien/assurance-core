@@ -14,8 +14,18 @@ on:
   # a tag can be pushed by anyone who can already push code. Making the tag
   # authoritative means cutting a version needs no capability beyond the one
   # required to write the version bump in the first place.
+  #
+  # A `release/v*` branch does the same job for an automation that can push
+  # branches but not tags — which is the shape of several CI and app tokens,
+  # including the one that maintains this repository. It is not a weaker gate:
+  # both refs need push access and nothing else, and the version guard below
+  # applies identically to either. The branch is a permanent ref at the
+  # published commit, so `git checkout release/v0.2.0` works the way a tag
+  # would; add the tag too if you like them tidy, and the second run no-ops
+  # because npm refuses a version that already exists.
   push:
     tags: ['v*']
+    branches: ['release/v*']
   # A published release still triggers it, so the two ways of cutting a version
   # agree. GitHub's own "create release from tag" flow pushes the tag first, so
   # the guard below has to tolerate seeing the same version twice — it does:
@@ -55,14 +65,18 @@ jobs:
       - name: Tag must match package.json version
         if: github.event_name != 'workflow_dispatch'
         env:
-          # `github.ref_name` is the tag on a tag push; the release event
-          # carries its own tag name. One of the two is always set here, and
-          # `workflow_dispatch` — where neither is meaningful — is excluded
-          # above rather than allowed to fall through to an empty string.
+          # `github.ref_name` is the tag on a tag push and the branch name on a
+          # branch push; the release event carries its own tag name. One of the
+          # two is always set here, and `workflow_dispatch` — where neither is
+          # meaningful — is excluded above rather than allowed to fall through
+          # to an empty string.
           TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           pkg=$(node -p "require('./package.json').version")
-          tag=${TAG#v}
+          # Strip `release/` before `v`, so `release/v0.2.0`, `v0.2.0` and
+          # `0.2.0` all reduce to the same thing to compare.
+          tag=${TAG#release/}
+          tag=${tag#v}
           if [ -z "$tag" ]; then
             echo "No tag name on a ${{ github.event_name }} event; refusing to guess." >&2
             exit 1
