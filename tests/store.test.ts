@@ -130,19 +130,12 @@ describe('the contract has teeth', () => {
       what: 'leaves a dispute open after it has been ruled on',
       catchesContaining: 'open until ruled on',
       break(store) {
-        const rule = store.ruleDispute.bind(store);
-        store.ruleDispute = async (input) => {
-          const before = store.dump().disputes.map((d) => ({ ...d }));
-          const result = await rule(input);
-          // Put the open flags back, as a store that treated `open` as
-          // independent of its rulings would.
-          const after = store.dump().disputes;
-          for (const [i, d] of after.entries()) {
-            (after as Array<{ open: boolean }>)[i]!.open = before[i]!.open;
-            void d;
-          }
-          return result;
-        };
+        // A store that holds `open` as its own column and forgets to clear it
+        // when a ruling lands — the flag and the history disagreeing, which is
+        // exactly the case the port says the history wins.
+        const list = store.disputes.bind(store);
+        store.disputes = async (ref) =>
+          (await list(ref)).map((d) => ({ ...d, open: true }));
       },
     },
     {

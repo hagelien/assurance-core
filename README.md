@@ -27,19 +27,51 @@ question: may this publish yet?
   sentence a person can read.
 - **Domain-independent.** Nothing here knows what your knowledge is *about*.
 
+## Running a review, not just deciding one
+
+A decision is a moment; a review is a sequence of them over days. Three pieces
+cover the parts of that sequence which are the same in every domain:
+
+- **`AssuranceStore`** — the persistence *port*. An interface your store
+  implements, not a storage layer this package owns. It carries governance
+  history: assessments, disputes and their rulings, decisions against a
+  version. It deliberately cannot create a proposal, append a version, or
+  publish — those are your acts, over content this package cannot read.
+- **`runStoreConformance`** — the contract, executable. A TypeScript interface
+  states shapes and nothing else; it cannot say that a revision must not
+  inherit the previous version's approvals. That clause and a dozen others are
+  checked against your adapter, and the suite returns plain results so you
+  assert on them in whatever test framework you already use. No framework
+  dependency comes with it.
+- **`selectReviewQueue`** and **`sealReviewPacket`** — who gets asked to review
+  what, and what they are allowed to see. The packet guard is the one worth
+  knowing about: it refuses to seal a reviewer's packet that carries another
+  reviewer's verdict or the running tally, so blind review survives the next
+  adapter written by someone who never read the query that was careful.
+
+`MemoryAssuranceStore` implements the port in memory for tests and examples.
+It is the same store the conformance suite runs against, so "what the contract
+means" and "what the reference does" cannot drift apart.
+
 ## What it deliberately leaves to you
 
 Three things, each because centralising them would be wrong rather than hard:
 
-1. **Persistence.** The core is values in, values out.
-2. **Actor resolution.** You authenticate the caller and hand down an
-   `ActorContext`. The core never authenticates anybody.
-3. **Projection.** How an `AssuranceProfile` appears to readers — a numeric
-   level, a badge, a traffic light, a sentence — is a product decision. The
-   core takes no position, and deliberately has no universal score: collapsing
-   the profile into one number destroys the distinction it exists to carry.
-   "Two agents agreed but no human looked" and "one high-tier model approved"
-   are different states, and no single integer says both.
+1. **Persistence.** The core describes the shape of your store and never holds
+   it. Extracting a storage layer instead would mean shipping a driver, and
+   the zero-dependency property is most of why this is worth taking.
+2. **Publishing.** Writing a change into your knowledge base is the one part
+   that does not generalise: what "applied" means differs completely between a
+   reference work, a decision log and a rulebook. There is no `publish` here
+   and there will not be one.
+3. **Actor resolution and projection.** You authenticate the caller and hand
+   down an `ActorContext`; the core never authenticates anybody. How an
+   `AssuranceProfile` appears to readers — a numeric level, a badge, a traffic
+   light, a sentence — is a product decision. The core takes no position, and
+   deliberately has no universal score: collapsing the profile into one number
+   destroys the distinction it exists to carry. "Two agents agreed but no human
+   looked" and "one high-tier model approved" are different states, and no
+   single integer says both.
 
 ## A worked example
 
@@ -154,8 +186,11 @@ a success it did not achieve.
 
 ## Status
 
-`0.1.0`, and honest about it: the API is in use but has been consumed by one
-host so far. Expect the surface to move before `1.0`.
+`0.2.0`, and honest about it: the API is in use but has been consumed by one
+host so far. `0.2.0` adds the store port, the conformance suite, the review
+queue and the review packet — a larger addition than the core it joins, and
+the part most likely to move once a second host has put weight on it. Expect
+the surface to change before `1.0`.
 
 ## Licence
 
