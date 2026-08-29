@@ -21,6 +21,13 @@
  * with the host — a numeric review level, a badge, a traffic light and a plain
  * sentence are all faithful renderings of the same profile, and the core takes
  * no position on which.
+ *
+ * Persistence is *described* here even though it is not provided:
+ * `AssuranceStore` is the interface a host implements, `MemoryAssuranceStore`
+ * is a reference implementation for tests and examples, and
+ * `runStoreConformance` is the executable contract a host runs against its own
+ * adapter. Describing the port here rather than letting each host invent one
+ * is what lets the review machinery above it be written once.
  */
 
 export * from './types.js';
@@ -30,3 +37,6 @@ export * from './assurance.js';
 export * from './requirements.js';
 export * from './policy.js';
 export * from './decisions.js';
+export * from './store.js';
+export * from './store-memory.js';
+export * from './store-conformance.js';
