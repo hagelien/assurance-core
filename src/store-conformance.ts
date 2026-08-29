@@ -32,25 +32,42 @@
 import type { ActorSnapshot } from './actors.js';
 import type { EvidenceRequirementState } from './assurance.js';
 import type { RiskProfile } from './risk.js';
-import type { ProposalVersionRef, TargetRef } from './types.js';
+import type {
+  ProposalVersionRef,
+  SpaceId,
+  TargetRef,
+  TargetType,
+} from './types.js';
 import type { AssuranceStore, Timestamp } from './store.js';
-import { formatVersionRef } from './store.js';
 
-/** What the suite asks a host to create before each check. */
+/**
+ * What the suite asks a host to create before each check.
+ *
+ * Both creators **return the identifiers the host assigned**, and do not
+ * accept them. That is not a stylistic choice: a host's ids come from its own
+ * store — a sequence, a UUID column, a natural key — and a suite that handed
+ * down `p1` and `v1` would only be runnable by a host willing to accept
+ * foreign ids for rows it creates. The first real adapter written against this
+ * suite could not, which is how the requirement was found.
+ *
+ * The same applies to the target. The `target` passed to `proposal` says which
+ * governed object is meant; the one returned says which the host actually
+ * used, and they can differ — a host with one collection normalises the space
+ * and type, and a host whose targets are integer-keyed will not keep the id it
+ * was handed. Checks compare against what came back.
+ */
 export interface ConformanceSeed {
   proposal(input: {
-    proposalId: string;
     target: TargetRef;
     author: ActorSnapshot;
     createdAt: Timestamp;
     open?: boolean;
-  }): Promise<void>;
+  }): Promise<{ proposalId: string; target: TargetRef }>;
   version(input: {
     proposalId: string;
-    versionId: string;
     risk?: RiskProfile;
     submittedAt?: Timestamp | null;
-  }): Promise<void>;
+  }): Promise<{ ref: ProposalVersionRef }>;
   evidence(
     ref: ProposalVersionRef,
     state: readonly EvidenceRequirementState[],
@@ -60,14 +77,47 @@ export interface ConformanceSeed {
 export interface ConformanceHarness {
   readonly store: AssuranceStore;
   readonly seed: ConformanceSeed;
+  /**
+   * The space the harness seeds into.
+   *
+   * Declared rather than dictated, for the same reason ids are: a host runs
+   * the spaces it runs, and one that governs a single collection cannot be
+   * asked to invent a second on request.
+   */
+  readonly space: SpaceId;
+  /** The target type the harness seeds. */
+  readonly targetType: TargetType;
+  /**
+   * A second space, when the host has one. Absent means the space-scoping
+   * check is **skipped and reported as skipped** — never quietly passed.
+   * A host that governs one collection genuinely cannot demonstrate that
+   * listing is scoped, and saying so is more useful than a green tick that
+   * means nothing.
+   */
+  readonly otherSpace?: SpaceId;
+  /** A second target type, when the host has one. Absent skips the type filter. */
+  readonly otherTargetType?: TargetType;
 }
 
 export interface ConformanceResult {
   readonly name: string;
   readonly ok: boolean;
-  /** Present when `ok` is false: what was expected and what came back. */
+  /**
+   * True when the harness cannot express what the check needs — a single-space
+   * host asked to prove space scoping, say.
+   *
+   * A skip is not a pass and is not counted as one. It is surfaced separately
+   * so a host can see exactly which clauses its shape leaves unverified, and
+   * decide whether that is acceptable, rather than reading a green run as full
+   * coverage.
+   */
+  readonly skipped?: boolean;
+  /** Why it failed, or why it was skipped. */
   readonly detail?: string;
 }
+
+/** Thrown by a check the harness cannot express. Reported as a skip. */
+class NotApplicable extends Error {}
 
 /** Thrown inside a check; caught and turned into a failing result. */
 class ContractViolation extends Error {}
@@ -84,10 +134,18 @@ function truthy(value: unknown, what: string): void {
   if (!value) throw new ContractViolation(`${what}: expected a truthy value`);
 }
 
-const SPACE = 'conformance';
 const T0 = '2020-01-01T00:00:00.000Z';
 const T1 = '2020-01-02T00:00:00.000Z';
 const T2 = '2020-01-03T00:00:00.000Z';
+
+/**
+ * An identifier no host would have issued.
+ *
+ * Deliberately not `'1'` or `'p1'`: those are plausible keys in an
+ * integer-keyed store, and a check for "an unknown id reads as null" that
+ * happened to name a real row would pass for the wrong reason.
+ */
+const UNKNOWN = '__conformance_no_such_id__';
 
 const human = (actorRef: string): ActorSnapshot => ({
   actorRef,
@@ -102,9 +160,10 @@ const agent = (actorRef: string): ActorSnapshot => ({
   assuranceCapabilities: [],
 });
 
-const target = (id: string, type = 'note'): TargetRef => ({
-  space: SPACE,
-  type,
+/** A target in the harness's own space and type. */
+const target = (h: ConformanceHarness, id: string, type?: TargetType): TargetRef => ({
+  space: h.space,
+  type: type ?? h.targetType,
   id,
 });
 
@@ -116,146 +175,198 @@ interface Check {
 const CHECKS: readonly Check[] = [
   {
     name: 'a seeded proposal reads back with its target and author',
-    async run({ store, seed }) {
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+    async run(h) {
+      const { store, seed } = h;
+      const created = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      const found = await store.getProposal('p1');
+      const found = await store.getProposal(created.proposalId);
       truthy(found, 'getProposal returned null for a seeded proposal');
-      equal(found!.target, target('n1'), 'proposal target');
+      equal(found!.target, created.target, 'proposal target');
+      // Whatever the host normalised the target to, it must be in the space
+      // the harness declared — otherwise every listing check below is asking
+      // about a space nothing was seeded into.
+      equal(found!.target.space, h.space, 'proposal space');
       equal(found!.author.actorRef, 'user:1', 'proposal author ref');
       equal(found!.open, true, 'a fresh proposal is open');
     },
   },
   {
     name: 'an unknown proposal or version reads as null, not as a throw',
-    async run({ store }) {
-      equal(await store.getProposal('nope'), null, 'getProposal(unknown)');
+    async run(h) {
+      const { store } = h;
+      // An id no host would have issued. A store that threw here would make
+      // every "does this exist?" call site carry a try/catch.
+      equal(await store.getProposal(UNKNOWN), null, 'getProposal(unknown)');
       equal(
-        await store.getVersion({ proposalId: 'nope', versionId: 'v1' }),
+        await store.getVersion({ proposalId: UNKNOWN, versionId: UNKNOWN }),
         null,
         'getVersion(unknown)',
       );
-      equal(await store.latestVersion('nope'), null, 'latestVersion(unknown)');
+      equal(await store.latestVersion(UNKNOWN), null, 'latestVersion(unknown)');
     },
   },
   {
     name: 'open proposals come back oldest first',
-    async run({ store, seed }) {
-      await seed.proposal({
-        proposalId: 'late',
-        target: target('n2'),
+    async run(h) {
+      const { store, seed } = h;
+      const late = await seed.proposal({
+        target: target(h, 'n2'),
         author: human('user:1'),
         createdAt: T2,
       });
-      await seed.proposal({
-        proposalId: 'early',
-        target: target('n1'),
+      const early = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      const open = await store.listOpenProposals(SPACE);
+      const open = await store.listOpenProposals(h.space);
       equal(
         open.map((p) => p.proposalId),
-        ['early', 'late'],
+        [early.proposalId, late.proposalId],
         'listOpenProposals order',
       );
     },
   },
   {
     name: 'a closed proposal is not listed as open',
-    async run({ store, seed }) {
+    async run(h) {
+      const { store, seed } = h;
       await seed.proposal({
-        proposalId: 'shut',
-        target: target('n1'),
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
         open: false,
       });
-      equal(await store.listOpenProposals(SPACE), [], 'listOpenProposals');
+      equal(await store.listOpenProposals(h.space), [], 'listOpenProposals');
     },
   },
   {
-    name: 'listOpenProposals filters by target type, author and limit',
-    async run({ store, seed }) {
+    name: 'listOpenProposals excludes an author on request',
+    async run(h) {
+      const { store, seed } = h;
       await seed.proposal({
-        proposalId: 'a',
-        target: target('n1', 'note'),
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.proposal({
-        proposalId: 'b',
-        target: target('n2', 'record'),
+      const other = await seed.proposal({
+        target: target(h, 'n2'),
         author: human('user:2'),
         createdAt: T1,
       });
       equal(
-        (await store.listOpenProposals(SPACE, { targetType: 'record' })).map(
-          (p) => p.proposalId,
-        ),
-        ['b'],
-        'targetType filter',
-      );
-      equal(
         (
-          await store.listOpenProposals(SPACE, { excludeAuthorRef: 'user:1' })
+          await store.listOpenProposals(h.space, { excludeAuthorRef: 'user:1' })
         ).map((p) => p.proposalId),
-        ['b'],
+        [other.proposalId],
         'excludeAuthorRef filter',
       );
+    },
+  },
+  {
+    name: 'listOpenProposals honours a limit, keeping the oldest',
+    async run(h) {
+      const { store, seed } = h;
+      const first = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      await seed.proposal({
+        target: target(h, 'n2'),
+        author: human('user:2'),
+        createdAt: T1,
+      });
+      // Which one survives the limit matters: a store that truncated a
+      // newest-first ordering would serve a queue that never reaches its own
+      // backlog, and the row count would look identical.
       equal(
-        (await store.listOpenProposals(SPACE, { limit: 1 })).map(
+        (await store.listOpenProposals(h.space, { limit: 1 })).map(
           (p) => p.proposalId,
         ),
-        ['a'],
+        [first.proposalId],
         'limit',
       );
     },
   },
   {
-    name: 'a proposal in another space is not listed',
-    async run({ store, seed }) {
+    name: 'listOpenProposals filters by target type',
+    async run(h) {
+      const { store, seed } = h;
+      if (!h.otherTargetType) {
+        throw new NotApplicable(
+          'the harness declares one target type, so a type filter cannot be observed',
+        );
+      }
       await seed.proposal({
-        proposalId: 'elsewhere',
-        target: { space: 'other', type: 'note', id: 'n1' },
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      equal(await store.listOpenProposals(SPACE), [], 'space scoping');
+      const other = await seed.proposal({
+        target: target(h, 'n2', h.otherTargetType),
+        author: human('user:2'),
+        createdAt: T1,
+      });
+      equal(other.target.type, h.otherTargetType, 'the host used the second type');
+      equal(
+        (
+          await store.listOpenProposals(h.space, {
+            targetType: h.otherTargetType,
+          })
+        ).map((p) => p.proposalId),
+        [other.proposalId],
+        'targetType filter',
+      );
     },
   },
   {
-    name: 'latestVersion returns the highest-numbered version',
-    async run({ store, seed }) {
+    name: 'a proposal in another space is not listed',
+    async run(h) {
+      const { store, seed } = h;
+      if (!h.otherSpace) {
+        throw new NotApplicable(
+          'the harness governs a single space, so scoping cannot be observed',
+        );
+      }
       await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+        target: { space: h.otherSpace, type: h.targetType, id: 'n1' },
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      await seed.version({ proposalId: 'p1', versionId: 'v2' });
-      const latest = await store.latestVersion('p1');
+      equal(await store.listOpenProposals(h.space), [], 'space scoping');
+    },
+  },
+  {
+    name: 'latestVersion returns the most recently appended version',
+    async run(h) {
+      const { store, seed } = h;
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      await seed.version({ proposalId });
+      const second = await seed.version({ proposalId });
+      const latest = await store.latestVersion(proposalId);
       truthy(latest, 'latestVersion returned null');
-      equal(latest!.ref.versionId, 'v2', 'latest version id');
+      equal(latest!.ref, second.ref, 'latest version ref');
       equal(latest!.versionNo > 1, true, 'versionNo increments');
     },
   },
   {
     name: 'a reviewer who revises holds one standing assessment, not two',
-    async run({ store, seed }) {
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+    async run(h) {
+      const { store, seed } = h;
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      const ref: ProposalVersionRef = { proposalId: 'p1', versionId: 'v1' };
+      const { ref } = await seed.version({ proposalId });
       const first = await store.recordAssessment({
         version: ref,
         assessorRef: 'user:2',
@@ -278,34 +389,32 @@ const CHECKS: readonly Check[] = [
   },
   {
     name: 'assessments are scoped to the version they were cast against',
-    async run({ store, seed }) {
+    async run(h) {
+      const { store, seed } = h;
       // The property that keeps a revision from inheriting an earlier
       // version's approvals — the single most consequential thing this port
       // asks a host to get right.
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      await seed.version({ proposalId: 'p1', versionId: 'v2' });
+      const first = await seed.version({ proposalId });
+      const second = await seed.version({ proposalId });
       await store.recordAssessment({
-        version: { proposalId: 'p1', versionId: 'v1' },
+        version: first.ref,
         assessorRef: 'user:2',
         assessorKind: 'human',
         verdict: 'approve',
         recordedAt: T0,
       });
       equal(
-        (await store.currentAssessments({ proposalId: 'p1', versionId: 'v2' }))
-          .length,
+        (await store.currentAssessments(second.ref)).length,
         0,
         'assessments leaking onto a later version',
       );
       equal(
-        (await store.currentAssessments({ proposalId: 'p1', versionId: 'v1' }))
-          .length,
+        (await store.currentAssessments(first.ref)).length,
         1,
         'assessments on the version they were cast against',
       );
@@ -313,17 +422,16 @@ const CHECKS: readonly Check[] = [
   },
   {
     name: 'the capability snapshot survives the round trip',
-    async run({ store, seed }) {
+    async run(h) {
+      const { store, seed } = h;
       // A verdict admitted while a capability was held must keep saying so,
       // and must not start reflecting the assessor's later capabilities.
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      const ref: ProposalVersionRef = { proposalId: 'p1', versionId: 'v1' };
+      const { ref } = await seed.version({ proposalId });
       await store.recordAssessment({
         version: ref,
         assessorRef: 'agent:7',
@@ -343,56 +451,52 @@ const CHECKS: readonly Check[] = [
   },
   {
     name: 'assessmentsByActor answers for many versions at once',
-    async run({ store, seed }) {
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+    async run(h) {
+      const { store, seed } = h;
+      const one = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.proposal({
-        proposalId: 'p2',
-        target: target('n2'),
+      const two = await seed.proposal({
+        target: target(h, 'n2'),
         author: human('user:1'),
         createdAt: T1,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      await seed.version({ proposalId: 'p2', versionId: 'v1' });
-      const a: ProposalVersionRef = { proposalId: 'p1', versionId: 'v1' };
-      const b: ProposalVersionRef = { proposalId: 'p2', versionId: 'v1' };
+      const a = await seed.version({ proposalId: one.proposalId });
+      const b = await seed.version({ proposalId: two.proposalId });
       await store.recordAssessment({
-        version: a,
+        version: a.ref,
         assessorRef: 'agent:7',
         assessorKind: 'agent',
         verdict: 'approve',
         recordedAt: T0,
       });
       await store.recordAssessment({
-        version: b,
+        version: b.ref,
         assessorRef: 'agent:8',
         assessorKind: 'agent',
         verdict: 'approve',
         recordedAt: T0,
       });
-      const mine = await store.assessmentsByActor('agent:7', [a, b]);
+      const mine = await store.assessmentsByActor('agent:7', [a.ref, b.ref]);
       equal(mine.length, 1, 'assessments for the named actor only');
-      equal(formatVersionRef(mine[0]!.version), formatVersionRef(a), 'which version');
+      equal(mine[0]!.version, a.ref, 'which version');
     },
   },
   {
     name: 'an implicit assessment is stored as implicit',
-    async run({ store, seed }) {
+    async run(h) {
+      const { store, seed } = h;
       // An author's submit-time stake is evidence of authorship, not of
       // review. A store that dropped the flag would let it count toward a
       // quorum.
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      const ref: ProposalVersionRef = { proposalId: 'p1', versionId: 'v1' };
+      const { ref } = await seed.version({ proposalId });
       await store.recordAssessment({
         version: ref,
         assessorRef: 'user:1',
@@ -402,20 +506,20 @@ const CHECKS: readonly Check[] = [
         recordedAt: T0,
       });
       const [stored] = await store.currentAssessments(ref);
+      truthy(stored, 'no assessment came back');
       equal(stored!.implicit, true, 'implicit flag');
     },
   },
   {
     name: 'a dispute is open until ruled on, and closed after',
-    async run({ store, seed }) {
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+    async run(h) {
+      const { store, seed } = h;
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      const ref: ProposalVersionRef = { proposalId: 'p1', versionId: 'v1' };
+      const { ref } = await seed.version({ proposalId });
       const dispute = await store.openDispute({
         version: ref,
         openedByRef: 'user:2',
@@ -439,15 +543,14 @@ const CHECKS: readonly Check[] = [
   },
   {
     name: 'latestDecision returns the most recent evaluation',
-    async run({ store, seed }) {
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+    async run(h) {
+      const { store, seed } = h;
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      const ref: ProposalVersionRef = { proposalId: 'p1', versionId: 'v1' };
+      const { ref } = await seed.version({ proposalId });
       equal(await store.latestDecision(ref), null, 'no decision yet');
       await store.recordDecision({
         version: ref,
@@ -468,22 +571,21 @@ const CHECKS: readonly Check[] = [
         evaluatedAt: T1,
       });
       const latest = await store.latestDecision(ref);
+      truthy(latest, 'latestDecision returned null after two decisions');
       equal(latest!.allowed, true, 'latest decision outcome');
       equal(latest!.mode, 'authoritative', 'latest decision mode');
     },
   },
   {
     name: 'evidence state round-trips as the host declared it',
-    async run({ store, seed }) {
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+    async run(h) {
+      const { store, seed } = h;
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T0,
       });
-      await seed.version({ proposalId: 'p1', versionId: 'v1' });
-      const ref: ProposalVersionRef = { proposalId: 'p1', versionId: 'v1' };
-      equal(await store.evidenceState(ref), [], 'no evidence declared');
+      const { ref } = await seed.version({ proposalId });
       await seed.evidence(ref, [{ requirementId: 'cited', satisfied: false }]);
       equal(
         await store.evidenceState(ref),
@@ -494,17 +596,57 @@ const CHECKS: readonly Check[] = [
   },
   {
     name: 'an agent author is stored as an agent, not flattened to a human',
-    async run({ store, seed }) {
+    async run(h) {
+      const { store, seed } = h;
       // Author kind drives rules that exist precisely to treat the two
       // differently. A store that lost it would make those rules unreachable.
-      await seed.proposal({
-        proposalId: 'p1',
-        target: target('n1'),
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
         author: agent('agent:7'),
         createdAt: T0,
       });
-      const found = await store.getProposal('p1');
+      const found = await store.getProposal(proposalId);
+      truthy(found, 'getProposal returned null');
       equal(found!.author.kind, 'agent', 'author kind');
+    },
+  },
+  {
+    name: 'a version carries the risk profile the host classified it with',
+    async run(h) {
+      const { store, seed } = h;
+      // The core cannot judge how consequential a change is; it reads what the
+      // host decided. A store that dropped the tags would make every tag rule
+      // in every policy unreachable, silently.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const { ref } = await seed.version({
+        proposalId,
+        risk: { level: 'high', tags: ['consequential'] },
+      });
+      const version = await store.getVersion(ref);
+      truthy(version, 'getVersion returned null for a seeded version');
+      equal(version!.risk.level, 'high', 'risk level');
+    },
+  },
+  {
+    name: 'an unsubmitted version says so rather than looking reviewable',
+    async run(h) {
+      const { store, seed } = h;
+      // A draft nobody has submitted must not reach a review queue. The queue
+      // reads `submittedAt`, so a store that stamped one anyway would put
+      // unfinished work in front of reviewers.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const { ref } = await seed.version({ proposalId, submittedAt: null });
+      const version = await store.getVersion(ref);
+      truthy(version, 'getVersion returned null');
+      equal(version!.submittedAt, null, 'submittedAt on an unsubmitted version');
     },
   },
 ];
@@ -527,6 +669,19 @@ export async function runStoreConformance(
       await check.run(harness);
       results.push({ name: check.name, ok: true });
     } catch (error) {
+      if (error instanceof NotApplicable) {
+        // Not a pass. `conformanceFailures` ignores it and
+        // `conformanceSkipped` names it, so a host sees which clauses its own
+        // shape leaves unverified instead of reading a green run as full
+        // coverage.
+        results.push({
+          name: check.name,
+          ok: false,
+          skipped: true,
+          detail: error.message,
+        });
+        continue;
+      }
       results.push({
         name: check.name,
         ok: false,
@@ -547,6 +702,21 @@ export function conformanceFailures(
   results: readonly ConformanceResult[],
 ): readonly string[] {
   return results
-    .filter((r) => !r.ok)
+    .filter((r) => !r.ok && !r.skipped)
     .map((r) => `${r.name} — ${r.detail ?? 'failed'}`);
+}
+
+/**
+ * Clauses the harness could not express, and why.
+ *
+ * Worth asserting on rather than ignoring: a host should know which parts of
+ * the contract its own shape leaves unchecked, and a skip list that grows
+ * without anyone noticing is how a conformance run stops meaning anything.
+ */
+export function conformanceSkipped(
+  results: readonly ConformanceResult[],
+): readonly string[] {
+  return results
+    .filter((r) => r.skipped)
+    .map((r) => `${r.name} — ${r.detail ?? 'not applicable'}`);
 }

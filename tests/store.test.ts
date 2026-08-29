@@ -30,12 +30,24 @@ import { STORE_CONFORMANCE_CHECKS } from '../src/store-conformance.js';
 function harnessFor(store: MemoryAssuranceStore): ConformanceHarness {
   return {
     store,
+    // The reference store has no domain, so it declares whatever the checks
+    // need — including the second space and type a real single-collection host
+    // cannot offer. That is why the ADR host is also run: this harness can
+    // never exercise the skip path.
+    space: 'conformance',
+    targetType: 'note',
+    otherSpace: 'other',
+    otherTargetType: 'record',
     seed: {
+      // The ids come back from the store, never down into it: see
+      // `ConformanceSeed`. The reference store assigns them the way a host's
+      // sequence would.
       async proposal(input) {
-        store.seedProposal(input);
+        const created = store.seedProposal(input);
+        return { proposalId: created.proposalId, target: created.target };
       },
       async version(input) {
-        store.seedVersion(input);
+        return { ref: store.seedVersion(input).ref };
       },
       async evidence(ref, state) {
         store.seedEvidence(ref, state);

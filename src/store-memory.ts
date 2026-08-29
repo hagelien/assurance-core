@@ -53,7 +53,13 @@ import type {
 import { formatVersionRef, sameVersion } from './store.js';
 
 export interface SeedProposalInput {
-  readonly proposalId: string;
+  /**
+   * Optional, and optional for a reason worth stating: a host's identifiers
+   * come from its own store, so nothing may require a caller to choose one.
+   * Supplying it is a convenience for a test that wants readable ids; omitting
+   * it is what a real host does.
+   */
+  readonly proposalId?: string;
   readonly target: TargetRef;
   readonly author: ActorSnapshot;
   readonly createdAt: Timestamp;
@@ -62,7 +68,7 @@ export interface SeedProposalInput {
 
 export interface SeedVersionInput {
   readonly proposalId: string;
-  readonly versionId: string;
+  readonly versionId?: string;
   readonly risk?: RiskProfile;
   readonly payloadFingerprint?: Fingerprint;
   readonly submittedAt?: Timestamp | null;
@@ -98,7 +104,7 @@ export class MemoryAssuranceStore implements AssuranceStore {
 
   seedProposal(input: SeedProposalInput): StoredProposal {
     const record: StoredProposal = {
-      proposalId: input.proposalId,
+      proposalId: input.proposalId ?? this.nextId('proposal'),
       target: input.target,
       author: input.author,
       currentVersionId: null,
@@ -114,14 +120,14 @@ export class MemoryAssuranceStore implements AssuranceStore {
     if (!proposal) {
       throw new Error(`seedVersion: no proposal ${input.proposalId}`);
     }
-    const versionNo =
-      this.versionsOf(input.proposalId).length + 1;
+    const versionNo = this.versionsOf(input.proposalId).length + 1;
+    const versionId = input.versionId ?? this.nextId('version');
     const record: StoredProposalVersion = {
-      ref: { proposalId: input.proposalId, versionId: input.versionId },
+      ref: { proposalId: input.proposalId, versionId },
       target: proposal.target,
       author: input.author ?? proposal.author,
       risk: input.risk ?? LOW_RISK,
-      payloadFingerprint: input.payloadFingerprint ?? `seed:${input.versionId}`,
+      payloadFingerprint: input.payloadFingerprint ?? `seed:${versionId}`,
       versionNo,
       submittedAt: input.submittedAt === undefined ? proposal.createdAt : input.submittedAt,
     };
@@ -130,7 +136,7 @@ export class MemoryAssuranceStore implements AssuranceStore {
     // same way a host's would follow its latest submitted one.
     this.proposals.set(proposal.proposalId, {
       ...proposal,
-      currentVersionId: input.versionId,
+      currentVersionId: versionId,
     });
     return record;
   }

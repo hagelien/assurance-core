@@ -29,7 +29,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "example": "tsx examples/adr-log.ts"
+    "example": "tsx examples/adr-log.ts",
+    "example:host": "tsx examples/adr-host/run.ts"
   },
   "keywords": [
     "governance",

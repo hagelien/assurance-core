@@ -73,6 +73,29 @@ Three things, each because centralising them would be wrong rather than hard:
    looked" and "one high-tier model approved" are different states, and no
    single integer says both.
 
+## Two hosts, one of them not the original
+
+`examples/adr-host/` is a complete second host — an architecture-decision log
+with its own tables, its own integer keys and its own idea of what a change is
+— wired to this package afterwards rather than designed around it. It runs a
+review end to end (`npm run example:host`), and its store adapter is put
+through `runStoreConformance` in the package's own test suite.
+
+That is the only real check that this core is domain-independent, and it paid
+for itself immediately. Building it found three things no amount of reading
+would have:
+
+- The conformance suite was choosing row ids. No store worth having lets a
+  caller name the key of a row it is about to create, so the contract changed:
+  the harness now returns the ids the host assigned. The same turned out to be
+  true of the target itself.
+- A host that governs one collection cannot demonstrate that listing is scoped
+  to a space. Those clauses are now reported as **skipped**, not passed — a
+  green run that silently covers less is worse than a shorter one that says so.
+- A real bug in the example host: `??` where `=== undefined` was meant, so
+  every unsubmitted draft came back looking reviewable. Nothing in that host's
+  own tests would have caught it, because nothing there reads the field.
+
 ## A worked example
 
 From [`examples/adr-log.ts`](examples/adr-log.ts) — an architecture-decision
@@ -186,11 +209,12 @@ a success it did not achieve.
 
 ## Status
 
-`0.2.0`, and honest about it: the API is in use but has been consumed by one
-host so far. `0.2.0` adds the store port, the conformance suite, the review
-queue and the review packet — a larger addition than the core it joins, and
-the part most likely to move once a second host has put weight on it. Expect
-the surface to change before `1.0`.
+`0.2.0`, and honest about it. It adds the store port, the conformance suite,
+the review queue and the review packet — a larger addition than the core it
+joins. Two hosts use it: the reference work it was extracted from, and the ADR
+log in `examples/`. The second one is deliberately small, so "it fits two
+domains" is a real claim about a modest range rather than a large one. Expect
+the surface to move before `1.0`.
 
 ## Licence
 
