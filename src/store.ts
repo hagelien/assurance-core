@@ -52,9 +52,20 @@
  *
  * ## Timestamps
  *
- * ISO-8601 strings, assigned by the host, never read by the core for anything
- * but ordering and display. This package reads no clock — see the build
- * config — so a record's time is something it is told, not something it knows.
+ * ISO-8601 strings **in UTC, `Z`-suffixed**, assigned by the host, never read
+ * by the core for anything but ordering and display. This package reads no
+ * clock — see the build config — so a record's time is something it is told,
+ * not something it knows.
+ *
+ * The offset is pinned because both this package and a store's own
+ * `listOpenProposals` ordering compare these strings directly, and lexical
+ * order equals chronological order only within one offset. Mix them and the
+ * two disagree silently: `2020-01-01T01:00:00+01:00` is the same instant as
+ * `00:00:00Z` and sorts after it, so a queue reports oldest-first while
+ * serving something else, and the review queue's early stop — which certifies
+ * a batch by comparing a submission against a creation time — certifies the
+ * wrong one. Normalising on the way out of the adapter is one call; defending
+ * every comparison against a representation nobody needs is not.
  */
 
 import type { ActorKind, ActorSnapshot } from './actors.js';
@@ -75,7 +86,14 @@ import type {
   TargetType,
 } from './types.js';
 
-/** An ISO-8601 instant, as the host recorded it. */
+/**
+ * An ISO-8601 instant in UTC, `Z`-suffixed — `2020-01-01T00:00:00.000Z`.
+ *
+ * The offset is part of the contract, not a formatting preference: these
+ * strings are compared directly, and lexical order is chronological order only
+ * within one offset. See the Timestamps section above. The conformance suite
+ * checks what a store hands back.
+ */
 export type Timestamp = string;
 
 /**

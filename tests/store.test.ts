@@ -131,6 +131,46 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'reports timestamps with an offset instead of in UTC',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // The realistic bug: an adapter that formats in the server's local
+        // zone. Nothing throws, every string is valid ISO-8601, and lexical
+        // comparison silently stops agreeing with chronological order.
+        const shift = (t: string | null): string | null =>
+          t === null
+            ? null
+            : new Date(new Date(t).getTime() + 3_600_000)
+                .toISOString()
+                .replace(/\.\d+Z$/, '+01:00');
+        const list = store.listOpenProposals.bind(store);
+        store.listOpenProposals = async (space, query) =>
+          (await list(space, query)).map((p) => ({
+            ...p,
+            createdAt: shift(p.createdAt)!,
+          }));
+      },
+    },
+    {
+      what: 'reports a version submitted before its own proposal existed',
+      catchesContaining: 'never older than its own proposal',
+      break(store) {
+        // The seeder stands in for the host's write path, so a store that
+        // accepts the row is one that can produce it. Here the guard is
+        // bypassed after the fact, which is what an import writing straight to
+        // the table would amount to.
+        const seed = store.seedVersion.bind(store);
+        store.seedVersion = (input) => {
+          const record = seed({ ...input, submittedAt: undefined });
+          if (input.submittedAt !== undefined) {
+            (record as { submittedAt: string | null }).submittedAt =
+              input.submittedAt;
+          }
+          return record;
+        };
+      },
+    },
+    {
       what: 'lists proposals newest first',
       catchesContaining: 'oldest first',
       break(store) {

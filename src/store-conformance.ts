@@ -154,6 +154,9 @@ const T2 = '2020-01-03T00:00:00.000Z';
  */
 const UNKNOWN = '__conformance_no_such_id__';
 
+/** The one timestamp shape whose lexical order is its chronological order. */
+const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
 const human = (actorRef: string): ActorSnapshot => ({
   actorRef,
   kind: 'human',
@@ -678,6 +681,51 @@ const CHECKS: readonly Check[] = [
       const version = await store.getVersion(ref);
       truthy(version, 'getVersion returned null for a seeded version');
       equal(version!.risk.level, 'high', 'risk level');
+    },
+  },
+  {
+    name: 'timestamps come back in UTC, as the contract pins them',
+    async run(h) {
+      const { store, seed } = h;
+      // Both this package and a store's own oldest-first ordering compare
+      // these strings directly, and lexical order is chronological order only
+      // within one offset. A host that hands back `2020-01-01T01:00:00+01:00`
+      // for the same instant as `00:00:00Z` sorts it after, so its queue
+      // reports oldest-first while serving something else — and nothing throws.
+      // The one representation that cannot do this is the one the contract
+      // names, so that is what is checked, rather than any parseable instant.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T1,
+      });
+      const { ref } = await seed.version({ proposalId, submittedAt: T2 });
+      await store.recordAssessment({
+        version: ref,
+        assessorRef: 'agent:1',
+        assessorKind: 'agent',
+        verdict: 'approve',
+        recordedAt: T2,
+      });
+      const [proposal] = await store.listOpenProposals(h.space);
+      truthy(proposal, 'listOpenProposals returned nothing');
+      const version = await store.getVersion(ref);
+      truthy(version, 'getVersion returned null');
+      const [assessment] = await store.currentAssessments(ref);
+      truthy(assessment, 'currentAssessments returned nothing');
+      for (const [what, value] of [
+        ['proposal createdAt', proposal!.createdAt],
+        ['version submittedAt', version!.submittedAt],
+        ['assessment recordedAt', assessment!.recordedAt],
+      ] as const) {
+        truthy(
+          typeof value === 'string' && UTC_TIMESTAMP.test(value),
+          `${what} is ${JSON.stringify(value)}, not a Z-suffixed UTC ` +
+            'ISO-8601 instant. Normalise on the way out of the adapter: ' +
+            'these strings are compared directly, and an offset makes ' +
+            'lexical order disagree with chronological order',
+        );
+      }
     },
   },
   {

@@ -667,6 +667,28 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     expect(result.truncated).toBe(false);
   });
 
+  it('proves a full batch that exactly fills the window', async () => {
+    // The sentinel is read to answer "is there more?" and its instant was
+    // thrown away. That cost a whole doubling — and with `limit` equal to the
+    // cap there is no doubling left to spend, so a complete batch of the ten
+    // oldest rows could certify only nine of them and came back `truncated`,
+    // reporting a hidden backlog over work it had provably found.
+    const store = backlog(60);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      maxCandidateWindow: 10,
+    });
+
+    expect(result.items.map((i) => i.target.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `n${String(i).padStart(4, '0')}`),
+    );
+    expect(result.truncated).toBe(false);
+  });
+
   it('does not serve a revised proposal over an older version it has not read', async () => {
     // The store orders by proposal creation; the batch orders by the current
     // version's submission. A proposal revised after a newer one was submitted
@@ -724,11 +746,11 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
       limit: 10,
     });
 
-    // The final window, not 10 + 20 + 40 summed over the re-reads. It is 40
-    // rather than 20 because settling requires items strictly older than the
-    // boundary, so the window that first *filled* the batch could not yet
-    // prove it.
-    expect(result.examined).toBe(40);
+    // The final window, not 10 + 20 summed over the re-reads. It is 20 because
+    // the boundary is the sentinel's instant — the oldest row the page did not
+    // serve — so the window that first filled the batch can also prove it, and
+    // there is no third doubling to sum.
+    expect(result.examined).toBe(20);
     expect(result.excluded).toHaveLength(10);
   });
 });

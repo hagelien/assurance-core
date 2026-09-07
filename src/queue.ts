@@ -253,13 +253,15 @@ interface CandidatePage {
   /** The store returned fewer proposals than asked for: there are no more. */
   readonly exhausted: boolean;
   /**
-   * The creation time of the last proposal read, or null for an empty page.
+   * The creation time of the oldest proposal this page did **not** serve, or
+   * of the last one it did when the space ran out first. Null for an empty
+   * page.
    *
-   * The store orders by proposal creation, so every proposal *not* read was
-   * created after this — and a version is never submitted before its proposal
-   * exists. So every unread row's version is newer than this instant, which is
-   * what lets the caller know when it has provably found the oldest work
-   * without reading the whole backlog.
+   * The store orders by proposal creation, so every proposal outside this page
+   * was created at or after this instant — and a version is never submitted
+   * before its proposal exists. So every unserved row's version is at least
+   * this old, which is what lets the caller know when it has provably found
+   * the oldest work without reading the whole backlog.
    */
   readonly readThrough: Timestamp | null;
 }
@@ -311,7 +313,14 @@ async function candidatePage(
       visible: true,
     });
   }
-  const last = proposals.at(-1);
+  // The sentinel's own instant, when there is one, and the last row taken
+  // otherwise. The sentinel is the oldest proposal this page did *not* serve,
+  // so every row outside the page — the sentinel included — was created at or
+  // after it, which is a weaker bar for a served item to clear than the last
+  // taken row's. Reading the extra row and then discarding its timestamp cost
+  // a whole doubling: with `limit` equal to the cap, a complete batch could
+  // certify only `limit - 1` of its items and came back `truncated`.
+  const boundary = read.at(limit === undefined ? -1 : limit) ?? proposals.at(-1);
   return {
     candidates,
     examinedProposals: proposals.length,
@@ -320,7 +329,7 @@ async function candidatePage(
     // short *candidate* count alone would loop forever against a space whose
     // oldest rows have no submitted version.
     exhausted: limit === undefined || read.length <= limit,
-    readThrough: last?.createdAt ?? null,
+    readThrough: boundary?.createdAt ?? null,
   };
 }
 
