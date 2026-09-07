@@ -236,20 +236,29 @@ export async function selectReviewQueue(args: {
 }
 
 /**
- * Candidates drawn from the store alone, for a host with no extra visibility
- * rule of its own.
+ * The most proposals one selection will read looking for `limit` eligible ones.
  *
- * Every candidate comes back `visible: true`, which is the honest default only
- * because the store was asked for one space's open proposals and nothing else.
- * A host with per-row access control must build its own candidates: passing a
- * row through here and filtering afterwards would mean it had already been
- * counted as examined and, worse, that a future caller could skip the filter.
+ * A ceiling rather than a promise: a reviewer who has judged more than this
+ * many of a space's oldest rows gets a short batch and a `truncated` flag, not
+ * an unbounded scan. Overridable per call for a host whose backlog needs a
+ * different one.
  */
-export async function candidatesFromStore(
+export const MAX_CANDIDATE_WINDOW = 2000;
+
+/** One read of the store, with what the caller needs to decide about reading more. */
+interface CandidatePage {
+  readonly candidates: readonly ReviewCandidate[];
+  /** Open proposals the store returned, before any of them were dropped. */
+  readonly examinedProposals: number;
+  /** The store returned fewer proposals than asked for: there are no more. */
+  readonly exhausted: boolean;
+}
+
+async function candidatePage(
   store: AssuranceStore,
   space: SpaceId,
-  query: { targetType?: TargetType; limit?: number } = {},
-): Promise<readonly ReviewCandidate[]> {
+  query: { targetType?: TargetType; limit?: number },
+): Promise<CandidatePage> {
   const proposals = await store.listOpenProposals(space, query);
   const candidates: ReviewCandidate[] = [];
   for (const proposal of proposals) {
@@ -266,5 +275,130 @@ export async function candidatesFromStore(
       visible: true,
     });
   }
-  return candidates;
+  return {
+    candidates,
+    examinedProposals: proposals.length,
+    // Distinguished from "some rows were dropped" deliberately: a caller that
+    // grew its window on a short *candidate* count alone would loop forever
+    // against a space whose oldest rows have no submitted version.
+    exhausted: query.limit === undefined || proposals.length < query.limit,
+  };
+}
+
+/**
+ * Candidates drawn from the store alone, for a host with no extra visibility
+ * rule of its own.
+ *
+ * Every candidate comes back `visible: true`, which is the honest default only
+ * because the store was asked for one space's open proposals and nothing else.
+ * A host with per-row access control must build its own candidates: passing a
+ * row through here and filtering afterwards would mean it had already been
+ * counted as examined and, worse, that a future caller could skip the filter.
+ *
+ * `limit` is a count of *candidates*, not of rows read. A proposal with no
+ * submitted version is not one, so asking for fifty and reading fifty rows
+ * returns fewer than fifty whenever any of them is unsubmitted — a short page
+ * that looks exactly like an exhausted backlog. The read window grows until
+ * the count is met or the space runs out.
+ *
+ * This does not, and cannot, account for the reviewer's own eligibility: it
+ * does not know who is asking. A queue served from these candidates has the
+ * same shortfall one rule further on — see {@link selectReviewQueueFromStore},
+ * which is the function to call when the reviewer is known.
+ */
+export async function candidatesFromStore(
+  store: AssuranceStore,
+  space: SpaceId,
+  query: { targetType?: TargetType; limit?: number; maxCandidateWindow?: number } = {},
+): Promise<readonly ReviewCandidate[]> {
+  const { limit, maxCandidateWindow, ...narrowing } = query;
+  if (limit === undefined) {
+    return (await candidatePage(store, space, narrowing)).candidates;
+  }
+  const cap = maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
+  let window = limit;
+  for (;;) {
+    const page = await candidatePage(store, space, { ...narrowing, limit: window });
+    if (page.candidates.length >= limit || page.exhausted || window >= cap) {
+      return page.candidates.slice(0, limit);
+    }
+    window = Math.min(window * 2, cap);
+  }
+}
+
+/** What {@link selectReviewQueueFromStore} returns beyond the plain selection. */
+export interface StoreReviewQueueResult extends ReviewQueueResult {
+  /**
+   * The window hit its cap before `limit` eligible rows were found, and the
+   * space had not run out.
+   *
+   * A short batch with this false means there is no more work for this
+   * reviewer. With it true the batch is short because the search stopped, and
+   * the two must not be read the same way: one is an empty backlog, the other
+   * is a backlog the queue gave up looking through.
+   */
+  readonly truncated: boolean;
+}
+
+/**
+ * The whole selection, over a store, for a host with no visibility rule.
+ *
+ * Why this exists rather than "call `candidatesFromStore`, then
+ * `selectReviewQueue`": those two apply the eligibility rules *after* the
+ * store's `limit`, and the rules are what make the batch short. A reviewer who
+ * has already judged the oldest `limit` rows of a space gets served nothing,
+ * while an equivalent SQL queue — which puts author-exclusion and
+ * already-judged inside its own query, ahead of its LIMIT — serves a full
+ * batch from further back. That is not a formatting difference: it is one
+ * queue showing a reviewer an empty backlog that another shows as full, and it
+ * was found in production rather than in a test, because on a small database
+ * the two agree.
+ *
+ * So the window grows — doubling, re-read from the start — until `limit`
+ * eligible rows are in hand, the space runs out, or the cap is reached.
+ * Re-reading the prefix costs at most one extra full read, which is what a
+ * cursor would buy back; a cursor is also a second thing every store
+ * implementation would have to get right, and `listOpenProposals` is
+ * contractually oldest-first, so a growing prefix is stable: the row at
+ * position n of the small window is at position n of the large one.
+ *
+ * `examined` and `excluded` describe the final window, not the sum of the
+ * re-reads — a prefix read three times was not three candidates.
+ */
+export async function selectReviewQueueFromStore(args: {
+  store: AssuranceStore;
+  space: SpaceId;
+  reviewerRef: string;
+  limit: number;
+  targetType?: TargetType;
+  selfReviewEnabled?: boolean;
+  reserves?: readonly TypeReserve[];
+  maxCandidateWindow?: number;
+}): Promise<StoreReviewQueueResult> {
+  const narrowing = args.targetType === undefined ? {} : { targetType: args.targetType };
+  const cap = args.maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
+  // Never below `limit`: serving a batch of `limit` requires reading at least
+  // that many, and a cap under it could only ever starve the batch.
+  let window = Math.max(args.limit, 1);
+  for (;;) {
+    const page = await candidatePage(args.store, args.space, {
+      ...narrowing,
+      limit: window,
+    });
+    const selection = await selectReviewQueue({
+      store: args.store,
+      reviewerRef: args.reviewerRef,
+      candidates: page.candidates,
+      limit: args.limit,
+      ...(args.selfReviewEnabled === undefined
+        ? {}
+        : { selfReviewEnabled: args.selfReviewEnabled }),
+      ...(args.reserves === undefined ? {} : { reserves: args.reserves }),
+    });
+    if (selection.items.length >= args.limit || page.exhausted) {
+      return { ...selection, truncated: false };
+    }
+    if (window >= cap) return { ...selection, truncated: true };
+    window = Math.min(window * 2, cap);
+  }
 }

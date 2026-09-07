@@ -47,7 +47,11 @@ cover the parts of that sequence which are the same in every domain:
   what, and what they are allowed to see. The packet guard refuses to seal a
   reviewer's packet that carries another reviewer's verdict or the running
   tally, so blind review survives the next adapter written by someone who never
-  read the query that was careful.
+  read the query that was careful. Serving from a store directly, use
+  **`selectReviewQueueFromStore`**: the eligibility rules apply *after* the
+  store's limit, so a reviewer who has judged the oldest page would otherwise
+  be served nothing while the backlog behind it is full, and that difference
+  only appears against a real backlog.
 
 `MemoryAssuranceStore` implements the port in memory for tests and examples.
 It is the same store the conformance suite runs against, so "what the contract

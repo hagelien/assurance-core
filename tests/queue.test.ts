@@ -15,6 +15,7 @@ import {
   judgedVersions,
   selectReviewBatch,
   selectReviewQueue,
+  selectReviewQueueFromStore,
   type ActorSnapshot,
   type ReviewCandidate,
 } from '../src/index.js';
@@ -341,5 +342,166 @@ describe('candidatesFromStore', () => {
     });
     s.seedVersion({ proposalId: 'p1', versionId: 'v1' });
     expect(await candidatesFromStore(s, 's')).toEqual([]);
+  });
+});
+
+describe('selectReviewQueueFromStore — the window has to outlast the rules', () => {
+  /**
+   * `n` open proposals in one space, strictly oldest-first, all by someone else.
+   *
+   * Distinct ages on purpose: the store orders on `(createdAt, proposalId)` and
+   * the batch on the version's own age, so a fixture with repeated timestamps
+   * would make an ordering assertion here a statement about tie-breaks rather
+   * than about the window.
+   */
+  const age = (i: number): string =>
+    `2020-01-01T${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00.000Z`;
+
+  function backlog(n: number): MemoryAssuranceStore {
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < n; i += 1) {
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+    return store;
+  }
+
+  async function judgeFirst(
+    store: MemoryAssuranceStore,
+    reviewerRef: string,
+    n: number,
+  ): Promise<void> {
+    const oldest = await store.listOpenProposals('s', { limit: n });
+    for (const proposal of oldest) {
+      await store.recordAssessment({
+        version: { proposalId: proposal.proposalId, versionId: `v-${proposal.target.id}` },
+        assessorRef: reviewerRef,
+        assessorKind: 'agent',
+        verdict: 'approve',
+        recordedAt: T(2),
+      });
+    }
+  }
+
+  it('serves a full batch from behind a window the reviewer has judged', async () => {
+    // The production reproduction, in miniature: the reviewer has judged every
+    // one of the oldest `limit` rows, so a selection that read `limit` and then
+    // applied the rules serves nothing at all — while an SQL queue filtering
+    // ahead of its own LIMIT serves a full batch from further back.
+    const store = backlog(60);
+    await judgeFirst(store, 'agent:7', 10);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    expect(result.items).toHaveLength(10);
+    expect(result.truncated).toBe(false);
+    // And it is the work immediately behind the judged prefix, in age order —
+    // growing the window must not reorder the backlog.
+    expect(result.items.map((i) => i.target.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `n${String(i + 10).padStart(4, '0')}`),
+    );
+  });
+
+  it('stops at the cap and says the batch is short because it stopped', async () => {
+    // The other half: a short batch must not be read as an empty backlog when
+    // the search was the thing that ended. There is eligible work here — it is
+    // past the cap.
+    const store = backlog(60);
+    await judgeFirst(store, 'agent:7', 40);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      maxCandidateWindow: 20,
+    });
+
+    expect(result.items).toHaveLength(0);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('does not claim truncation when the space simply runs out', async () => {
+    const store = backlog(12);
+    await judgeFirst(store, 'agent:7', 8);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    expect(result.items).toHaveLength(4);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('counts the final window, not the sum of the re-reads', async () => {
+    // `examined` is a diagnostic a host compares against another queue's. A
+    // prefix read three times was not three candidates, and reporting it as
+    // such would make every parity comparison disagree by the re-read.
+    const store = backlog(60);
+    await judgeFirst(store, 'agent:7', 10);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    expect(result.examined).toBe(20);
+    expect(result.excluded).toHaveLength(10);
+  });
+});
+
+describe('candidatesFromStore — limit counts candidates, not rows read', () => {
+  it('fills the count past proposals with no submitted version', async () => {
+    // Unsubmitted proposals are dropped after the store's limit, so asking for
+    // three and reading three returned one. A host cannot tell that short page
+    // from an exhausted backlog.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 10; i += 1) {
+      const id = `n${i}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: T(i + 1),
+      });
+      // Every third one is submitted; the rest are drafts with no version to show.
+      store.seedVersion({
+        proposalId: `p-${id}`,
+        versionId: `v-${id}`,
+        ...(i % 3 === 0 ? { submittedAt: T(1) } : { submittedAt: null }),
+      });
+    }
+
+    const candidates = await candidatesFromStore(store, 's', { limit: 3 });
+    expect(candidates.map((c) => c.target.id)).toEqual(['n0', 'n3', 'n6']);
+  });
+
+  it('returns what there is when the space runs out first', async () => {
+    const store = new MemoryAssuranceStore();
+    store.seedProposal({
+      proposalId: 'p-n0',
+      target: { space: 's', type: 'note', id: 'n0' },
+      author: actor('user:1'),
+      createdAt: T(1),
+    });
+    store.seedVersion({ proposalId: 'p-n0', versionId: 'v-n0', submittedAt: T(1) });
+
+    expect(await candidatesFromStore(store, 's', { limit: 5 })).toHaveLength(1);
   });
 });
