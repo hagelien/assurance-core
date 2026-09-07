@@ -804,12 +804,47 @@ const CHECKS: readonly Check[] = [
       // above: separately implemented, over the same row.
       const [byActor] = await store.assessmentsByActor('agent:1', [ref]);
       truthy(byActor, 'assessmentsByActor returned nothing');
+      // Every timestamp the port hands back, not the three the queue reads.
+      // The contract is on the type, so a clause that checked only the fields
+      // one caller happens to compare would leave the rest free to be written
+      // any way at all — and a host normalising per call site rather than at
+      // the adapter boundary is exactly how the offsets get in.
+      const dispute = await store.openDispute({
+        version: ref,
+        openedByRef: 'user:2',
+        openedByKind: 'human',
+        openedAt: T1,
+      });
+      await store.ruleDispute({
+        disputeId: dispute.disputeId,
+        ruling: 'rejected',
+        ruledByRef: 'user:3',
+        ruledAt: T2,
+      });
+      await store.recordDecision({
+        version: ref,
+        policyId: 'p',
+        policyVersion: '1',
+        allowed: false,
+        inputFingerprint: 'f1',
+        mode: 'shadow',
+        evaluatedAt: T2,
+      });
+      const [stored] = await store.disputes(ref);
+      truthy(stored, 'disputes returned nothing');
+      const [ruling] = await store.disputeRulings(dispute.disputeId);
+      truthy(ruling, 'disputeRulings returned nothing');
+      const decision = await store.latestDecision(ref);
+      truthy(decision, 'latestDecision returned null');
       for (const [what, value] of [
         ['proposal createdAt', proposal!.createdAt],
         ['version submittedAt (getVersion)', version!.submittedAt],
         ['version submittedAt (latestVersion)', latest!.submittedAt],
         ['assessment recordedAt (currentAssessments)', assessment!.recordedAt],
         ['assessment recordedAt (assessmentsByActor)', byActor!.recordedAt],
+        ['dispute openedAt', stored!.openedAt],
+        ['ruling ruledAt', ruling!.ruledAt],
+        ['decision evaluatedAt', decision!.evaluatedAt],
       ] as const) {
         truthy(
           isCanonicalTimestamp(value),

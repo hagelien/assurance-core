@@ -130,6 +130,28 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'formats dispute and decision timestamps with an offset',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // The contract is on the type, so it holds for every row the port
+        // returns — not only the three the review queue happens to compare.
+        // A host that normalises per call site instead of at the adapter
+        // boundary leaves the rest looking like this.
+        const offset = (t: string): string =>
+          `${t.slice(0, 19)}+00:00`;
+        const disputes = store.disputes.bind(store);
+        store.disputes = async (ref) =>
+          (await disputes(ref)).map((d) => ({ ...d, openedAt: offset(d.openedAt) }));
+        const decision = store.latestDecision.bind(store);
+        store.latestDecision = async (ref) => {
+          const found = await decision(ref);
+          return found === null
+            ? null
+            : { ...found, evaluatedAt: offset(found.evaluatedAt) };
+        };
+      },
+    },
+    {
       what: 'returns a shape-correct impossible date',
       catchesContaining: 'come back in UTC',
       break(store) {
