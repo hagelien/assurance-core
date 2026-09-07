@@ -130,6 +130,19 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'normalises createdAt for the listing but not for getProposal',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        const get = store.getProposal.bind(store);
+        store.getProposal = async (proposalId) => {
+          const found = await get(proposalId);
+          return found === null
+            ? null
+            : { ...found, createdAt: `${found.createdAt.slice(0, 19)}+00:00` };
+        };
+      },
+    },
+    {
       what: 'formats what it returns from a write differently from what it stores',
       catchesContaining: 'come back in UTC',
       break(store) {

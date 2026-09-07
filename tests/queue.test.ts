@@ -872,16 +872,19 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
   });
 });
 
-describe('both growing loops hydrate each proposal once', () => {
-  // The property, not an arithmetic bound on a fixture: every `latestVersion`
-  // is for a proposal not asked about before. Each growth re-reads the prefix,
-  // so without a cache shared across the whole call a run to the cap costs
-  // 100 + 200 + 400 + … sequential round trips against a store built for real
-  // latency.
+describe('growing re-reads cost a bounded multiple, and carry nothing forward', () => {
+  // A cache across the re-reads was here twice and is gone: keyed on the
+  // proposal id it answered a later pass with a version read before a
+  // revision, and keyed additionally on `currentVersionId` it relied on a
+  // projection this port documents as permitted to disagree with the history.
+  // A revision token the contract lets lag is not one.
   //
-  // Asserted for both loops because they have twice needed the same fix and
-  // received it once — the cache first, then the window clamp — each shipping
-  // as its own defect a few lines from a loop that already did it right.
+  // What is asserted instead is the two things that replaced it. The cost is
+  // a geometric series, so it stays a small multiple of the final window
+  // rather than growing quadratically — that is the regression worth a test,
+  // because it is the one that would make the loop unusable rather than
+  // merely slower. Freshness is covered by the concurrent-submission case
+  // above, which is the property the cache cost us.
   const age = (i: number): string =>
     `2020-01-01T${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00.000Z`;
 
@@ -896,8 +899,6 @@ describe('both growing loops hydrate each proposal once', () => {
         author: actor('user:1'),
         createdAt: age(i),
       });
-      // No version row at all for the rest — `latestVersion` returns null for
-      // them, which is the case a `??`-based cache treats as a miss forever.
       if (i % 5 === 0) {
         store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
       }
@@ -914,7 +915,9 @@ describe('both growing loops hydrate each proposal once', () => {
   it('when growing to fill a candidate count', async () => {
     const { store, asked } = sparse();
     await candidatesFromStore(store, 's', { limit: 50 });
-    expect(asked).toHaveLength(new Set(asked).size);
+    // 750 reads over a final window of 400: the prefixes summed, not squared.
+    expect(asked).toHaveLength(750);
+    expect(asked.length).toBeLessThan(2 * new Set(asked).size);
   });
 
   it('when growing to settle a batch', async () => {
@@ -925,7 +928,8 @@ describe('both growing loops hydrate each proposal once', () => {
       reviewerRef: 'agent:7',
       limit: 10,
     });
-    expect(asked).toHaveLength(new Set(asked).size);
+    expect(asked).toHaveLength(150);
+    expect(asked.length).toBeLessThan(2 * new Set(asked).size);
   });
 });
 

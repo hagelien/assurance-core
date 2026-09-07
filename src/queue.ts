@@ -32,7 +32,7 @@
  * their own work.
  */
 
-import type { AssuranceStore, StoredProposalVersion, Timestamp } from './store.js';
+import type { AssuranceStore, Timestamp } from './store.js';
 import { formatVersionRef } from './store.js';
 import type { ProposalVersionRef, SpaceId, TargetRef, TargetType } from './types.js';
 
@@ -245,19 +245,6 @@ export async function selectReviewQueue(args: {
  */
 export const MAX_CANDIDATE_WINDOW = 2000;
 
-/**
- * One `latestVersion` per proposal per revision, across a growing window.
- *
- * `at` is the `currentVersionId` the row carried when it was hydrated. It is
- * the invalidation key: the store is live under a window that is re-read, and
- * an entry recorded before a revision or a first submission describes a
- * proposal that no longer exists in that state.
- */
-type HydrationCache = Map<
-  string,
-  { at: string | null; version: StoredProposalVersion | null }
->;
-
 /** One read of the store, with what the caller needs to decide about reading more. */
 interface CandidatePage {
   readonly candidates: readonly ReviewCandidate[];
@@ -283,7 +270,6 @@ async function candidatePage(
   store: AssuranceStore,
   space: SpaceId,
   query: { targetType?: TargetType; limit?: number },
-  hydrated?: HydrationCache,
 ): Promise<CandidatePage> {
   const { limit, ...narrowing } = query;
   // One row past the window, and only to answer "is there more?".
@@ -299,34 +285,25 @@ async function candidatePage(
   const proposals = limit === undefined ? read : read.slice(0, limit);
   const candidates: ReviewCandidate[] = [];
   for (const proposal of proposals) {
-    // Hydrated once per proposal across a growing window. Each growth re-reads
-    // the prefix, and hydration is one `latestVersion` per row, so without the
-    // cache a run to the default cap costs 100 + 200 + 400 + 800 + 1600 + 2000
-    // sequential round trips against a store built for real latency.
+    // Read on this pass, not carried from an earlier one.
     //
-    // Keyed on the proposal's `currentVersionId` as well as its id, because the
-    // window is re-read and the store is live underneath it. A proposal
-    // submitted between two passes comes back from the second read with a
-    // current version where the first had none, and a cache keyed on the id
-    // alone would answer with the `null` it learned first — so the row would be
-    // missing from the batch this request serves, not merely late. The
-    // projection is in the row already in hand, so noticing costs nothing.
+    // A cache across the re-reads is the obvious saving and was here twice:
+    // first keyed on the proposal id, which answered a later pass with a
+    // version read before a revision, and then keyed additionally on
+    // `currentVersionId` — which this port documents as a projection that may
+    // disagree with the history, with the history winning. A revision token
+    // the contract permits to lag is not a revision token, so that key made
+    // the staleness rarer without making it impossible, which is the worse of
+    // the two failures: it is the same wrong answer, now hard to reproduce.
     //
-    // A hit is by presence, not by truthiness: a proposal with no version
-    // caches as `null`, and treating that as a miss re-fetched exactly the rows
-    // the cache was added for — a backlog thick with unsubmitted proposals is
-    // what makes the window grow in the first place.
-    let version: StoredProposalVersion | null;
-    const cached = hydrated?.get(proposal.proposalId);
-    if (cached !== undefined && cached.at === proposal.currentVersionId) {
-      version = cached.version;
-    } else {
-      version = await store.latestVersion(proposal.proposalId);
-      hydrated?.set(proposal.proposalId, {
-        at: proposal.currentVersionId,
-        version,
-      });
-    }
+    // So a growing window costs a bounded multiple of its final size in round
+    // trips — measured at 1.9x on the fixtures in `queue.test.ts`, since the
+    // re-read prefixes are a geometric series — and every value in the page it
+    // returns was read on the pass that produced it. A caller that wants the saving back needs the
+    // store to promise a snapshot, or the port to gain a cursor so the prefix
+    // is not re-read at all — either is a contract change, and neither belongs
+    // in a queue fix.
+    const version = await store.latestVersion(proposal.proposalId);
     // A proposal with no submitted version is not reviewable: there is nothing
     // to show. Skipped rather than shown as excluded, because it never became
     // a candidate in the first place.
@@ -456,10 +433,6 @@ async function overGrowingWindow<T>(
       `limit must be an integer of at least 0, got ${String(args.limit)}`,
     );
   }
-  // Without this each growth re-reads the prefix and re-hydrates every row in
-  // it, at one `latestVersion` apiece — 100 + 200 + 400 + … round trips
-  // against a store built for real latency.
-  const hydrated: HydrationCache = new Map();
   // `limit` rows to serve `limit`, but never past the cap. A caller asking for
   // more than the ceiling allows is asking for something the ceiling forbids,
   // and reading 10,000 rows because the limit said so would make the cap
@@ -470,7 +443,6 @@ async function overGrowingWindow<T>(
       args.store,
       args.space,
       { ...args.narrowing, limit: window },
-      hydrated,
     );
     const { settled, value } = await attempt(page);
     if (settled || page.exhausted) return { value, truncated: false };

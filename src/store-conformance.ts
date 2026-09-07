@@ -794,6 +794,10 @@ const CHECKS: readonly Check[] = [
       });
       const [proposal] = await store.listOpenProposals(h.space);
       truthy(proposal, 'listOpenProposals returned nothing');
+      // The third pair: `getProposal` is a separate implementation returning
+      // the same row, so the queue's read being right says nothing about it.
+      const fetched = await store.getProposal(proposalId);
+      truthy(fetched, 'getProposal returned null');
       const version = await store.getVersion(ref);
       truthy(version, 'getVersion returned null');
       // Separately, because they are separately implemented and the review
@@ -841,7 +845,8 @@ const CHECKS: readonly Check[] = [
       const decision = await store.latestDecision(ref);
       truthy(decision, 'latestDecision returned null');
       for (const [what, value] of [
-        ['proposal createdAt', proposal!.createdAt],
+        ['proposal createdAt (listOpenProposals)', proposal!.createdAt],
+        ['proposal createdAt (getProposal)', fetched!.createdAt],
         ['version submittedAt (getVersion)', version!.submittedAt],
         ['version submittedAt (latestVersion)', latest!.submittedAt],
         ['assessment recordedAt (currentAssessments)', assessment!.recordedAt],
