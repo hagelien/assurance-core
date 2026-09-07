@@ -499,6 +499,40 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     expect(result.items.filter((i) => i.target.type === 'record')).toHaveLength(2);
   });
 
+  it('settles when reserves overlap, as the allocator does', async () => {
+    // Fractions may total more than one — 80% A then 80% B is a legitimate way
+    // to say "mostly A, then B" — and `selectReviewBatch` gives the first its
+    // eight slots and caps the second at the two left. Demanding both full
+    // fractions here scanned to the cap and called a finished batch truncated.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 40; i += 1) {
+      const type = i % 2 === 0 ? 'note' : 'record';
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type, id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      maxCandidateWindow: 20,
+      reserves: [
+        { targetType: 'note', fraction: 0.8 },
+        { targetType: 'record', fraction: 0.8 },
+      ],
+    });
+
+    expect(result.items).toHaveLength(10);
+    expect(result.truncated).toBe(false);
+  });
+
   it('does not serve a revised proposal over an older version it has not read', async () => {
     // The store orders by proposal creation; the batch orders by the current
     // version's submission. A proposal revised after a newer one was submitted

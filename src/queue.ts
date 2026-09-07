@@ -348,9 +348,17 @@ export async function candidatesFromStore(
     return (await candidatePage(store, space, narrowing)).candidates;
   }
   const cap = maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
+  // This loop grows too, so it needs the same cache: without one, growing past
+  // unsubmitted rows re-hydrates the whole prefix on every doubling.
+  const hydrated = new Map<string, StoredProposalVersion | null>();
   let window = limit;
   for (;;) {
-    const page = await candidatePage(store, space, { ...narrowing, limit: window });
+    const page = await candidatePage(
+      store,
+      space,
+      { ...narrowing, limit: window },
+      hydrated,
+    );
     if (page.candidates.length >= limit || page.exhausted || window >= cap) {
       return page.candidates.slice(0, limit);
     }
@@ -471,10 +479,19 @@ function settled(
     (item) => through !== null && item.createdAt <= through,
   );
   if (provable.length < args.limit) return false;
+  // The same remaining-capacity rule `selectReviewBatch` allocates by, not the
+  // raw fractions. Reserves may total more than one — 80% of A and 80% of B is
+  // a legitimate way to say "mostly A, then B" — and the allocator gives the
+  // first its eight slots and caps the second at the two left. Demanding both
+  // full fractions here would scan to the cap and report `truncated` over a
+  // batch the allocator considers finished.
+  let remaining = args.limit;
   for (const { targetType, fraction } of args.reserves ?? []) {
-    const want = Math.min(Math.ceil(args.limit * fraction), args.limit);
+    if (remaining <= 0) break;
+    const want = Math.min(Math.ceil(args.limit * fraction), remaining);
     const have = provable.filter((i) => i.target.type === targetType).length;
     if (have < want) return false;
+    remaining -= want;
   }
   return true;
 }
