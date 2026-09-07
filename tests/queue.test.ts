@@ -912,6 +912,38 @@ describe('growing re-reads cost a bounded multiple, and carry nothing forward', 
     return { store, asked };
   }
 
+  it('overlaps the reads without letting them all go at once', async () => {
+    // Serially, a grown window is thousands of round trips end to end against
+    // a store built for real latency — a queue endpoint that takes seconds.
+    // Unbounded is the other failure: one request opening as many connections
+    // as the window is wide. So the assertion is two-sided, and the order the
+    // page depends on has to survive the overlap.
+    const { store } = sparse();
+    let inFlight = 0;
+    let peak = 0;
+    const latest = store.latestVersion.bind(store);
+    store.latestVersion = async (proposalId) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      // A real tick, so overlapping calls are actually concurrent rather than
+      // resolving before the next one starts.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const found = await latest(proposalId);
+      inFlight -= 1;
+      return found;
+    };
+
+    const candidates = await candidatesFromStore(store, 's', { limit: 20 });
+
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+    // Oldest-first, unchanged by the overlap: results are placed by index, not
+    // pushed as they land.
+    expect(candidates.map((c) => c.target.id)).toEqual(
+      Array.from({ length: 20 }, (_, i) => `n${String(i * 5).padStart(4, '0')}`),
+    );
+  });
+
   it('when growing to fill a candidate count', async () => {
     const { store, asked } = sparse();
     await candidatesFromStore(store, 's', { limit: 50 });

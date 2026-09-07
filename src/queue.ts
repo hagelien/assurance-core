@@ -266,6 +266,44 @@ interface CandidatePage {
   readonly readThrough: Timestamp | null;
 }
 
+/**
+ * How many hydration reads may be outstanding at once.
+ *
+ * A ceiling rather than a target. One at a time turns a grown window into
+ * thousands of sequential round trips; all at once turns a single queue
+ * request into a connection-pool exhaustion. Modest on purpose: the win over
+ * serial is most of the way there by a handful, and a core has no idea what
+ * else is contending for the host's pool.
+ */
+const HYDRATION_CONCURRENCY = 8;
+
+/**
+ * Map with at most `limit` calls in flight, results in input order.
+ *
+ * Order matters here rather than being a nicety: `listOpenProposals` is
+ * oldest-first and the page's candidates inherit that order, so results are
+ * placed by index rather than pushed as they land.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+  );
+  return results;
+}
+
 async function candidatePage(
   store: AssuranceStore,
   space: SpaceId,
@@ -283,31 +321,40 @@ async function candidatePage(
   const asked = limit === undefined ? narrowing : { ...narrowing, limit: limit + 1 };
   const read = await store.listOpenProposals(space, asked);
   const proposals = limit === undefined ? read : read.slice(0, limit);
+  // Read on this pass, not carried from an earlier one.
+  //
+  // A cache across the re-reads is the obvious saving and was here twice:
+  // first keyed on the proposal id, which answered a later pass with a version
+  // read before a revision, and then keyed additionally on `currentVersionId`
+  // — which this port documents as a projection that may disagree with the
+  // history, with the history winning. A revision token the contract permits
+  // to lag is not a revision token, so that key made the staleness rarer
+  // without making it impossible, which is the worse of the two failures: the
+  // same wrong answer, now hard to reproduce.
+  //
+  // What is left is a bounded multiple of the final window in *calls* —
+  // measured at 1.9x, the re-read prefixes being a geometric series — and
+  // those calls overlap rather than queueing one behind another. Serially, a
+  // grown window is thousands of round trips end to end against a store built
+  // for real latency, which is a queue endpoint that takes seconds; the cap is
+  // on how many are outstanding, because "all of them at once" is how a
+  // connection pool is exhausted by a single request.
+  //
+  // Getting the calls themselves back needs the store to promise a snapshot,
+  // or the port to gain a cursor so the prefix is not re-read at all. Both are
+  // contract changes and neither belongs in a queue fix.
+  const versions = await mapWithConcurrency(
+    proposals,
+    HYDRATION_CONCURRENCY,
+    (proposal) => store.latestVersion(proposal.proposalId),
+  );
   const candidates: ReviewCandidate[] = [];
-  for (const proposal of proposals) {
-    // Read on this pass, not carried from an earlier one.
-    //
-    // A cache across the re-reads is the obvious saving and was here twice:
-    // first keyed on the proposal id, which answered a later pass with a
-    // version read before a revision, and then keyed additionally on
-    // `currentVersionId` — which this port documents as a projection that may
-    // disagree with the history, with the history winning. A revision token
-    // the contract permits to lag is not a revision token, so that key made
-    // the staleness rarer without making it impossible, which is the worse of
-    // the two failures: it is the same wrong answer, now hard to reproduce.
-    //
-    // So a growing window costs a bounded multiple of its final size in round
-    // trips — measured at 1.9x on the fixtures in `queue.test.ts`, since the
-    // re-read prefixes are a geometric series — and every value in the page it
-    // returns was read on the pass that produced it. A caller that wants the saving back needs the
-    // store to promise a snapshot, or the port to gain a cursor so the prefix
-    // is not re-read at all — either is a contract change, and neither belongs
-    // in a queue fix.
-    const version = await store.latestVersion(proposal.proposalId);
+  proposals.forEach((proposal, index) => {
+    const version = versions[index]!;
     // A proposal with no submitted version is not reviewable: there is nothing
     // to show. Skipped rather than shown as excluded, because it never became
     // a candidate in the first place.
-    if (!version || version.submittedAt === null) continue;
+    if (!version || version.submittedAt === null) return;
     candidates.push({
       version: version.ref,
       target: version.target,
@@ -315,7 +362,7 @@ async function candidatePage(
       authorRef: proposal.author.actorRef,
       visible: true,
     });
-  }
+  });
   // The sentinel's own instant, when there is one, and the last row taken
   // otherwise. The sentinel is the oldest proposal this page did *not* serve,
   // so every row outside the page — the sentinel included — was created at or
