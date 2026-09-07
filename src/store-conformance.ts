@@ -718,11 +718,18 @@ const CHECKS: readonly Check[] = [
       truthy(proposal, 'listOpenProposals returned nothing');
       const version = await store.getVersion(ref);
       truthy(version, 'getVersion returned null');
+      // Separately, because they are separately implemented and the review
+      // queue reads only this one: a `submittedAt` normalised on the way out
+      // of `getVersion` and handed back raw here is invisible to a check that
+      // asks the other path, and is exactly the value `settled` compares.
+      const latest = await store.latestVersion(proposalId);
+      truthy(latest, 'latestVersion returned null');
       const [assessment] = await store.currentAssessments(ref);
       truthy(assessment, 'currentAssessments returned nothing');
       for (const [what, value] of [
         ['proposal createdAt', proposal!.createdAt],
-        ['version submittedAt', version!.submittedAt],
+        ['version submittedAt (getVersion)', version!.submittedAt],
+        ['version submittedAt (latestVersion)', latest!.submittedAt],
         ['assessment recordedAt', assessment!.recordedAt],
       ] as const) {
         truthy(

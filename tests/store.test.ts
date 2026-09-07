@@ -152,6 +152,26 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'normalises timestamps on one read path but not the other',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // Two methods, two implementations. The review queue reads only
+        // `latestVersion`, so a `getVersion` that formats correctly proves
+        // nothing about the value that actually reaches the comparison.
+        const latest = store.latestVersion.bind(store);
+        store.latestVersion = async (proposalId) => {
+          const version = await latest(proposalId);
+          if (version === null || version.submittedAt === null) return version;
+          return {
+            ...version,
+            submittedAt: new Date(new Date(version.submittedAt).getTime() + 3_600_000)
+              .toISOString()
+              .replace(/\.\d+Z$/, '+01:00'),
+          };
+        };
+      },
+    },
+    {
       what: 'trims trailing zeros off its timestamps',
       catchesContaining: 'come back in UTC',
       break(store) {
