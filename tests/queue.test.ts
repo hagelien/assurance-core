@@ -432,6 +432,28 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     expect(result.truncated).toBe(true);
   });
 
+  it('does not claim truncation at a cap the backlog exactly fills', async () => {
+    // The boundary the sentinel exists for. The space holds precisely
+    // `maxCandidateWindow` proposals, so the capped read returns precisely that
+    // many and looks identical to a space holding a million more — and with
+    // some of them ineligible the search ends at the cap. Without the extra
+    // row it reported a hidden backlog over a space it had read to the end,
+    // which is this flag's own distinction inverted.
+    const store = backlog(20);
+    await judgeFirst(store, 'agent:7', 15);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      maxCandidateWindow: 20,
+    });
+
+    expect(result.items).toHaveLength(5);
+    expect(result.truncated).toBe(false);
+  });
+
   it('does not claim truncation when the space simply runs out', async () => {
     const store = backlog(12);
     await judgeFirst(store, 'agent:7', 8);

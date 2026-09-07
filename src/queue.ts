@@ -259,7 +259,18 @@ async function candidatePage(
   space: SpaceId,
   query: { targetType?: TargetType; limit?: number },
 ): Promise<CandidatePage> {
-  const proposals = await store.listOpenProposals(space, query);
+  const { limit, ...narrowing } = query;
+  // One row past the window, and only to answer "is there more?".
+  //
+  // A short page proves exhaustion; a full one does not, and the difference
+  // matters exactly at the boundary. A space holding precisely `limit` open
+  // proposals returns precisely `limit` rows, so without the sentinel it looks
+  // identical to a space holding a million — and a caller at its cap would
+  // report `truncated` over a backlog it had in fact read to the end, which is
+  // the distinction this page exists to keep honest, inverted.
+  const asked = limit === undefined ? narrowing : { ...narrowing, limit: limit + 1 };
+  const read = await store.listOpenProposals(space, asked);
+  const proposals = limit === undefined ? read : read.slice(0, limit);
   const candidates: ReviewCandidate[] = [];
   for (const proposal of proposals) {
     const version = await store.latestVersion(proposal.proposalId);
@@ -278,10 +289,11 @@ async function candidatePage(
   return {
     candidates,
     examinedProposals: proposals.length,
-    // Distinguished from "some rows were dropped" deliberately: a caller that
-    // grew its window on a short *candidate* count alone would loop forever
-    // against a space whose oldest rows have no submitted version.
-    exhausted: query.limit === undefined || proposals.length < query.limit,
+    // The sentinel decides this, not the candidate count. Distinguished from
+    // "some rows were dropped" deliberately: a caller that grew its window on a
+    // short *candidate* count alone would loop forever against a space whose
+    // oldest rows have no submitted version.
+    exhausted: limit === undefined || read.length <= limit,
   };
 }
 
