@@ -781,7 +781,11 @@ const CHECKS: readonly Check[] = [
         createdAt: T1,
       });
       const { ref } = await seed.version({ proposalId, submittedAt: T2 });
-      await store.recordAssessment({
+      // Kept, not discarded: these methods return the same stored types, so a
+      // store that persists canonically and formats its own return value some
+      // other way is nonconforming on a value a caller can use directly
+      // without ever reading it back.
+      const appended = await store.recordAssessment({
         version: ref,
         assessorRef: 'agent:1',
         assessorKind: 'agent',
@@ -815,13 +819,13 @@ const CHECKS: readonly Check[] = [
         openedByKind: 'human',
         openedAt: T1,
       });
-      await store.ruleDispute({
+      const appendedRuling = await store.ruleDispute({
         disputeId: dispute.disputeId,
         ruling: 'rejected',
         ruledByRef: 'user:3',
         ruledAt: T2,
       });
-      await store.recordDecision({
+      const appendedDecision = await store.recordDecision({
         version: ref,
         policyId: 'p',
         policyVersion: '1',
@@ -845,6 +849,10 @@ const CHECKS: readonly Check[] = [
         ['dispute openedAt', stored!.openedAt],
         ['ruling ruledAt', ruling!.ruledAt],
         ['decision evaluatedAt', decision!.evaluatedAt],
+        ['assessment recordedAt (recordAssessment)', appended.recordedAt],
+        ['dispute openedAt (openDispute)', dispute.openedAt],
+        ['ruling ruledAt (ruleDispute)', appendedRuling.ruledAt],
+        ['decision evaluatedAt (recordDecision)', appendedDecision.evaluatedAt],
       ] as const) {
         truthy(
           isCanonicalTimestamp(value),

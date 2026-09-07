@@ -130,6 +130,20 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'formats what it returns from a write differently from what it stores',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // Persisted canonically, handed back with an offset. A caller that
+        // uses the returned row directly — which is why these methods return
+        // it — never reads the correct value at all.
+        const record = store.recordAssessment.bind(store);
+        store.recordAssessment = async (input) => {
+          const stored = await record(input);
+          return { ...stored, recordedAt: `${stored.recordedAt.slice(0, 19)}+00:00` };
+        };
+      },
+    },
+    {
       what: 'formats dispute and decision timestamps with an offset',
       catchesContaining: 'come back in UTC',
       break(store) {
