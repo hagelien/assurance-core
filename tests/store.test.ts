@@ -104,6 +104,34 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'drops the implicit flag from assessmentsByActor only',
+      catchesContaining: 'assessmentsByActor answers for many versions',
+      break(store) {
+        // `judgedVersions` reads this method and skips implicit rows. Lose the
+        // flag here and a self-reviewing author's own submit-time stake counts
+        // as a judgment, so their work disappears from their own queue — the
+        // failure the self-review grant exists to prevent, on a store whose
+        // `currentAssessments` is perfectly correct.
+        const byActor = store.assessmentsByActor.bind(store);
+        store.assessmentsByActor = async (actorRef, versions) =>
+          (await byActor(actorRef, versions)).map((a) => ({ ...a, implicit: false }));
+      },
+    },
+    {
+      what: 'returns a shape-correct impossible date',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // Matches the pattern to the character and is not a date. Ordering it
+        // against real instants is meaningless in either direction.
+        const list = store.listOpenProposals.bind(store);
+        store.listOpenProposals = async (space, query) =>
+          (await list(space, query)).map((p) => ({
+            ...p,
+            createdAt: '2020-99-99T99:99:99.999Z',
+          }));
+      },
+    },
+    {
       what: 'supersedes in currentAssessments but not in assessmentsByActor',
       catchesContaining: 'assessmentsByActor answers for many versions',
       break(store) {

@@ -164,6 +164,47 @@ const UNKNOWN = '__conformance_no_such_id__';
  */
 const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
+/**
+ * The shape *and* a real instant.
+ *
+ * `2020-99-99T99:99:99.999Z` matches the pattern and is not a date, so the
+ * pattern alone certifies a value the contract calls an ISO-8601 instant when
+ * it is only ISO-8601-shaped. Ordering such a value against real ones is
+ * meaningless in either direction, and a store returning one is broken in a
+ * way the suite should say out loud.
+ *
+ * Checked by arithmetic rather than by round-tripping through the `Date`
+ * constructor, which would be the shorter way to write it: this package reads
+ * no clock, and the guard enforcing that is a lexical one — it cannot tell a
+ * parse of a string from a read of the clock, because they are spelled the
+ * same. A guard relaxed to admit the constructor for parsing no longer
+ * excludes the read, so the few lines of month lengths below are the cheaper
+ * of the two costs.
+ */
+function isCanonicalTimestamp(value: unknown): boolean {
+  if (typeof value !== 'string' || !UTC_TIMESTAMP.test(value)) return false;
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  const hour = Number(value.slice(11, 13));
+  const minute = Number(value.slice(14, 16));
+  const second = Number(value.slice(17, 19));
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > daysInMonth(year, month)) return false;
+  // 23:59:60 is a real ISO-8601 leap second and not a value any store here
+  // produces, so it is rejected with the rest: the contract is what
+  // `toISOString` emits, and that never renders one.
+  return hour <= 23 && minute <= 59 && second <= 59;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    return leap ? 29 : 28;
+  }
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
 const human = (actorRef: string): ActorSnapshot => ({
   actorRef,
   kind: 'human',
@@ -514,6 +555,24 @@ const CHECKS: readonly Check[] = [
       const revised = await store.assessmentsByActor('agent:7', [a.ref, b.ref]);
       equal(revised.length, 1, 'a revised verdict is one standing assessment');
       equal(revised[0]!.verdict, 'dispute', 'the standing verdict');
+      // And the implicit flag survives this path, not only the other one.
+      // `judgedVersions` reads here and skips implicit rows, because an
+      // author's submit-time stake is a claim of authorship rather than a
+      // judgment. A store that dropped the flag here would make every
+      // self-reviewing author's own work vanish from their own queue — the
+      // exact failure the self-review grant exists to prevent, and invisible
+      // to a check that asks `currentAssessments` for it.
+      await store.recordAssessment({
+        version: b.ref,
+        assessorRef: 'user:1',
+        assessorKind: 'human',
+        verdict: 'approve',
+        implicit: true,
+        recordedAt: T0,
+      });
+      const authors = await store.assessmentsByActor('user:1', [a.ref, b.ref]);
+      equal(authors.length, 1, 'the author holds one assessment');
+      equal(authors[0]!.implicit, true, 'implicit survives assessmentsByActor');
     },
   },
   {
@@ -748,7 +807,7 @@ const CHECKS: readonly Check[] = [
         ['assessment recordedAt', assessment!.recordedAt],
       ] as const) {
         truthy(
-          typeof value === 'string' && UTC_TIMESTAMP.test(value),
+          isCanonicalTimestamp(value),
           `${what} is ${JSON.stringify(value)}, not a Z-suffixed UTC ` +
             'ISO-8601 instant with milliseconds (2020-01-01T00:00:00.000Z). ' +
             'Normalise on the way out of the adapter — `toISOString()` ' +
