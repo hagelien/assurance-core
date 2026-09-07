@@ -499,6 +499,21 @@ const CHECKS: readonly Check[] = [
       const mine = await store.assessmentsByActor('agent:7', [a.ref, b.ref]);
       equal(mine.length, 1, 'assessments for the named actor only');
       equal(mine[0]!.version, a.ref, 'which version');
+      // The standing rule holds here too, and is asserted here rather than
+      // only on `currentAssessments`, because the two are separate methods
+      // over the same history and the review queue reads this one. A store
+      // that superseded correctly in one and returned raw history from the
+      // other would satisfy a suite that only ever asked the other.
+      await store.recordAssessment({
+        version: a.ref,
+        assessorRef: 'agent:7',
+        assessorKind: 'agent',
+        verdict: 'dispute',
+        recordedAt: T1,
+      });
+      const revised = await store.assessmentsByActor('agent:7', [a.ref, b.ref]);
+      equal(revised.length, 1, 'a revised verdict is one standing assessment');
+      equal(revised[0]!.verdict, 'dispute', 'the standing verdict');
     },
   },
   {

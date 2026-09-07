@@ -104,6 +104,24 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'supersedes in currentAssessments but not in assessmentsByActor',
+      catchesContaining: 'assessmentsByActor answers for many versions',
+      break(store) {
+        // Two methods over one history. The review queue reads this one, so a
+        // store that applies the standing rule only in its sibling looks
+        // right to anything that asks the sibling.
+        const dump = store.dump.bind(store);
+        store.assessmentsByActor = async (actorRef, versions) => {
+          const wanted = new Set(versions.map((v) => `${v.proposalId}/${v.versionId}`));
+          return dump().assessments.filter(
+            (a) =>
+              a.assessorRef === actorRef &&
+              wanted.has(`${a.version.proposalId}/${a.version.versionId}`),
+          );
+        };
+      },
+    },
+    {
       what: 'ignores the version an assessment was cast against',
       catchesContaining: 'scoped to the version',
       break(store) {
