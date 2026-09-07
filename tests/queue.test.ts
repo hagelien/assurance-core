@@ -499,6 +499,40 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     expect(result.items.filter((i) => i.target.type === 'record')).toHaveLength(2);
   });
 
+  it('does not settle on a tie at the window boundary', async () => {
+    // The boundary guarantee is "every unread proposal was created after the
+    // last one read", which at equal timestamps says nothing: an unread row can
+    // share the boundary instant and carry a version submitted at it, and the
+    // store's tie-break need not match the batch's. Here the eleventh row ties
+    // with the tenth and is the one the batch would serve first.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 12; i += 1) {
+      const id = `n${String(i).padStart(4, '0')}`;
+      // Rows 9 and 10 share a creation instant, straddling a window of 10.
+      const at = i >= 9 && i <= 10 ? age(9) : age(i);
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: at,
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: at });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    // It read past the tie rather than settling on it, so the whole space is
+    // accounted for and the batch is the ten oldest of twelve.
+    expect(result.items).toHaveLength(10);
+    expect(result.examined).toBe(12);
+    expect(result.truncated).toBe(false);
+  });
+
   it('settles when reserves overlap, as the allocator does', async () => {
     // Fractions may total more than one — 80% A then 80% B is a legitimate way
     // to say "mostly A, then B" — and `selectReviewBatch` gives the first its
@@ -590,7 +624,11 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
       limit: 10,
     });
 
-    expect(result.examined).toBe(20);
+    // The final window, not 10 + 20 + 40 summed over the re-reads. It is 40
+    // rather than 20 because settling requires items strictly older than the
+    // boundary, so the window that first *filled* the batch could not yet
+    // prove it.
+    expect(result.examined).toBe(40);
     expect(result.excluded).toHaveLength(10);
   });
 });

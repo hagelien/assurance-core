@@ -475,8 +475,18 @@ function settled(
   args: { limit: number; reserves?: readonly TypeReserve[] },
 ): boolean {
   const through = page.readThrough;
+  // Strictly older, not "at or older". At equality the guarantee runs out: an
+  // unread proposal may share the boundary's `createdAt` and carry a version
+  // submitted at that same instant, and the store contract promises oldest-first
+  // without promising a tie-break that matches the batch's. So a tie is exactly
+  // the case where an unread row could still sort ahead of a served one.
+  //
+  // The cost is a space whose rows all share one timestamp and outnumbers the
+  // cap: it grows to the cap and says `truncated`, which is the honest answer,
+  // because there it genuinely cannot prove the batch. Anything smaller runs
+  // out first and settles on `exhausted`.
   const provable = selection.items.filter(
-    (item) => through !== null && item.createdAt <= through,
+    (item) => through !== null && item.createdAt < through,
   );
   if (provable.length < args.limit) return false;
   // The same remaining-capacity rule `selectReviewBatch` allocates by, not the
