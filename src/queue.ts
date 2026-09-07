@@ -354,29 +354,68 @@ export async function candidatesFromStore(
   if (limit === undefined) {
     return (await candidatePage(store, space, narrowing)).candidates;
   }
-  const cap = maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
-  // This loop grows too, so it needs the same cache: without one, growing past
-  // unsubmitted rows re-hydrates the whole prefix on every doubling.
+  // The cap is reached silently here: this returns no `truncated`, so a
+  // clamped call is a short list with nothing to distinguish it from an
+  // exhausted space. That is why {@link selectReviewQueueFromStore} exists for
+  // the case where the answer has to say which of the two it is.
+  const { value } = await overGrowingWindow(
+    { store, space, narrowing, limit, maxCandidateWindow },
+    (page) => ({
+      settled: page.candidates.length >= limit,
+      value: page.candidates.slice(0, limit),
+    }),
+  );
+  return value;
+}
+
+/**
+ * Read a growing prefix of a space until a caller-supplied rule settles.
+ *
+ * Both callers below need the same four things — a window clamped to the cap,
+ * doubling, one hydration per proposal across the re-reads, and the cap
+ * reported rather than hidden — and differ only in when they have enough.
+ * Written out twice, they drifted twice: the hydration cache was added to one
+ * and not the other, and so was the clamp, each shipping as its own defect in
+ * a loop that already read correctly a few lines away. The stopping rule is
+ * the part that genuinely differs, so it is the part that is passed in.
+ *
+ * `truncated` means the window reached the cap without settling, on a space
+ * that had not run out — the batch is short because the search stopped, not
+ * because there is no more work. A caller with nowhere to report that ignores
+ * it, and says so where it does.
+ */
+async function overGrowingWindow<T>(
+  args: {
+    store: AssuranceStore;
+    space: SpaceId;
+    narrowing: { targetType?: TargetType };
+    limit: number;
+    maxCandidateWindow?: number | undefined;
+  },
+  attempt: (
+    page: CandidatePage,
+  ) => { settled: boolean; value: T } | Promise<{ settled: boolean; value: T }>,
+): Promise<{ value: T; truncated: boolean }> {
+  const cap = args.maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
+  // Without this each growth re-reads the prefix and re-hydrates every row in
+  // it, at one `latestVersion` apiece — 100 + 200 + 400 + … round trips
+  // against a store built for real latency.
   const hydrated = new Map<string, StoredProposalVersion | null>();
-  // Clamped for the same reason the queue selector's is: the ceiling bounds
-  // the work one call may do, and seeding the window from `limit` alone let a
-  // caller step over it just by asking for more than it allows. Unlike the
-  // selector this returns no `truncated`, so a clamped call is a short list
-  // with nothing to distinguish it from an exhausted space — the same silence
-  // the loop already produces on reaching the cap by doubling, which is why
-  // {@link selectReviewQueueFromStore} is the function to call when the answer
-  // has to say which of the two it is.
-  let window = Math.min(limit, cap);
+  // `limit` rows to serve `limit`, but never past the cap. A caller asking for
+  // more than the ceiling allows is asking for something the ceiling forbids,
+  // and reading 10,000 rows because the limit said so would make the cap
+  // decorative — it exists to bound the work one request can do.
+  let window = Math.min(Math.max(args.limit, 1), cap);
   for (;;) {
     const page = await candidatePage(
-      store,
-      space,
-      { ...narrowing, limit: window },
+      args.store,
+      args.space,
+      { ...args.narrowing, limit: window },
       hydrated,
     );
-    if (page.candidates.length >= limit || page.exhausted || window >= cap) {
-      return page.candidates.slice(0, limit);
-    }
+    const { settled, value } = await attempt(page);
+    if (settled || page.exhausted) return { value, truncated: false };
+    if (window >= cap) return { value, truncated: true };
     window = Math.min(window * 2, cap);
   }
 }
@@ -431,37 +470,29 @@ export async function selectReviewQueueFromStore(args: {
   maxCandidateWindow?: number;
 }): Promise<StoreReviewQueueResult> {
   const narrowing = args.targetType === undefined ? {} : { targetType: args.targetType };
-  const cap = args.maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
-  const hydrated = new Map<string, StoredProposalVersion | null>();
-  // `limit` rows to serve `limit`, but never past the cap. A caller asking for
-  // more than the ceiling allows is asking for something the ceiling forbids,
-  // and reading 10,000 rows because the limit said so would make the cap
-  // decorative — it exists to bound the work one request can do. Such a call
-  // gets the batch the cap permits, and `truncated` says the search stopped.
-  let window = Math.min(Math.max(args.limit, 1), cap);
-  for (;;) {
-    const page = await candidatePage(
-      args.store,
-      args.space,
-      { ...narrowing, limit: window },
-      hydrated,
-    );
-    const selection = await selectReviewQueue({
+  const { value, truncated } = await overGrowingWindow(
+    {
       store: args.store,
-      reviewerRef: args.reviewerRef,
-      candidates: page.candidates,
+      space: args.space,
+      narrowing,
       limit: args.limit,
-      ...(args.selfReviewEnabled === undefined
-        ? {}
-        : { selfReviewEnabled: args.selfReviewEnabled }),
-      ...(args.reserves === undefined ? {} : { reserves: args.reserves }),
-    });
-    if (page.exhausted || settled(selection, page, args)) {
-      return { ...selection, truncated: false };
-    }
-    if (window >= cap) return { ...selection, truncated: true };
-    window = Math.min(window * 2, cap);
-  }
+      maxCandidateWindow: args.maxCandidateWindow,
+    },
+    async (page) => {
+      const selection = await selectReviewQueue({
+        store: args.store,
+        reviewerRef: args.reviewerRef,
+        candidates: page.candidates,
+        limit: args.limit,
+        ...(args.selfReviewEnabled === undefined
+          ? {}
+          : { selfReviewEnabled: args.selfReviewEnabled }),
+        ...(args.reserves === undefined ? {} : { reserves: args.reserves }),
+      });
+      return { settled: settled(selection, page, args), value: selection };
+    },
+  );
+  return { ...value, truncated };
 }
 
 /**

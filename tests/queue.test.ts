@@ -733,6 +733,63 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
   });
 });
 
+describe('both growing loops hydrate each proposal once', () => {
+  // The property, not an arithmetic bound on a fixture: every `latestVersion`
+  // is for a proposal not asked about before. Each growth re-reads the prefix,
+  // so without a cache shared across the whole call a run to the cap costs
+  // 100 + 200 + 400 + … sequential round trips against a store built for real
+  // latency.
+  //
+  // Asserted for both loops because they have twice needed the same fix and
+  // received it once — the cache first, then the window clamp — each shipping
+  // as its own defect a few lines from a loop that already did it right.
+  const age = (i: number): string =>
+    `2020-01-01T${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00.000Z`;
+
+  /** 400 proposals, only every fifth submitted, so the window has to grow far. */
+  function sparse(): { store: MemoryAssuranceStore; asked: string[] } {
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 400; i += 1) {
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      // No version row at all for the rest — `latestVersion` returns null for
+      // them, which is the case a `??`-based cache treats as a miss forever.
+      if (i % 5 === 0) {
+        store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+      }
+    }
+    const asked: string[] = [];
+    const latest = store.latestVersion.bind(store);
+    store.latestVersion = async (proposalId) => {
+      asked.push(proposalId);
+      return latest(proposalId);
+    };
+    return { store, asked };
+  }
+
+  it('when growing to fill a candidate count', async () => {
+    const { store, asked } = sparse();
+    await candidatesFromStore(store, 's', { limit: 50 });
+    expect(asked).toHaveLength(new Set(asked).size);
+  });
+
+  it('when growing to settle a batch', async () => {
+    const { store, asked } = sparse();
+    await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+    expect(asked).toHaveLength(new Set(asked).size);
+  });
+});
+
 describe('candidatesFromStore — limit counts candidates, not rows read', () => {
   it('fills the count past proposals with no submitted version', async () => {
     // Unsubmitted proposals are dropped after the store's limit, so asking for
