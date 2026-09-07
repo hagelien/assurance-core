@@ -535,7 +535,10 @@ const CHECKS: readonly Check[] = [
         assessorRef: 'agent:8',
         assessorKind: 'agent',
         verdict: 'approve',
-        recordedAt: T0,
+        // T1, not T0: this version sits on the proposal created at T1, so its
+        // version was submitted at T1 and an assessment recorded at T0 would
+        // predate the thing it assesses.
+        recordedAt: T1,
       });
       const mine = await store.assessmentsByActor('agent:7', [a.ref, b.ref]);
       equal(mine.length, 1, 'assessments for the named actor only');
@@ -568,7 +571,7 @@ const CHECKS: readonly Check[] = [
         assessorKind: 'human',
         verdict: 'approve',
         implicit: true,
-        recordedAt: T0,
+        recordedAt: T1,
       });
       const authors = await store.assessmentsByActor('user:1', [a.ref, b.ref]);
       equal(authors.length, 1, 'the author holds one assessment');
