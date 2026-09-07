@@ -689,6 +689,42 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     expect(result.truncated).toBe(false);
   });
 
+  it('rejects a ceiling that is not a number instead of looping on it', async () => {
+    // `NaN` makes every comparison in the loop false — `NaN >= NaN` included,
+    // and so is the exhaustion test — so the window grows to `NaN` for ever
+    // against a store that answers nothing. Measured before the guard: more
+    // than 40 reads against a space holding five rows, with no way out.
+    //
+    // A malformed numeric config is the caller's bug either way. The
+    // difference is between an exception naming the field and a request that
+    // never returns, and only one of those can be found from a stack trace.
+    const store = backlog(5);
+
+    await expect(
+      selectReviewQueueFromStore({
+        store,
+        space: 's',
+        reviewerRef: 'agent:7',
+        limit: 10,
+        maxCandidateWindow: Number.NaN,
+      }),
+    ).rejects.toThrow(RangeError);
+
+    await expect(
+      selectReviewQueueFromStore({
+        store,
+        space: 's',
+        reviewerRef: 'agent:7',
+        limit: Number.NaN,
+      }),
+    ).rejects.toThrow(RangeError);
+
+    // Both public entry points grow, so both were exposed.
+    await expect(
+      candidatesFromStore(store, 's', { limit: 10, maxCandidateWindow: Number.NaN }),
+    ).rejects.toThrow(RangeError);
+  });
+
   it('does not serve a revised proposal over an older version it has not read', async () => {
     // The store orders by proposal creation; the batch orders by the current
     // version's submission. A proposal revised after a newer one was submitted

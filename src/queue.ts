@@ -406,6 +406,25 @@ async function overGrowingWindow<T>(
   ) => { settled: boolean; value: T } | Promise<{ settled: boolean; value: T }>,
 ): Promise<{ value: T; truncated: boolean }> {
   const cap = args.maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
+  // Rejected rather than defaulted, and checked before any read. A ceiling
+  // that is not a number makes every comparison below false — `NaN >= NaN` is
+  // false, and so is the exhaustion test — so the loop grows a window of `NaN`
+  // for ever, querying a store that answers nothing. A malformed numeric
+  // config is a caller's bug either way; the difference is between an
+  // exception naming the field and a request that never returns, and only one
+  // of those can be found from a stack trace.
+  if (!Number.isFinite(cap) || cap < 1) {
+    throw new RangeError(
+      `maxCandidateWindow must be a finite number of at least 1, got ${String(
+        args.maxCandidateWindow,
+      )}`,
+    );
+  }
+  if (!Number.isFinite(args.limit) || args.limit < 0) {
+    throw new RangeError(
+      `limit must be a finite number of at least 0, got ${String(args.limit)}`,
+    );
+  }
   // Without this each growth re-reads the prefix and re-hydrates every row in
   // it, at one `latestVersion` apiece — 100 + 200 + 400 + … round trips
   // against a store built for real latency.

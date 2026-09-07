@@ -190,6 +190,22 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'persists a backdated version and then throws',
+      catchesContaining: 'never older than its own proposal',
+      break(store) {
+        // The failure a bare `catch { return }` reads as conformance: the row
+        // is written and the write then fails, so it is exactly as visible as
+        // one that succeeded. A partially-applied import looks like this.
+        const seed = store.seedVersion.bind(store);
+        store.seedVersion = (input) => {
+          const record = seed({ ...input, submittedAt: undefined });
+          if (input.submittedAt === undefined) return record;
+          (record as { submittedAt: string | null }).submittedAt = input.submittedAt;
+          throw new Error('write failed after the row was persisted');
+        };
+      },
+    },
+    {
       what: 'lists proposals newest first',
       catchesContaining: 'oldest first',
       break(store) {

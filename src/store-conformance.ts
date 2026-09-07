@@ -753,28 +753,36 @@ const CHECKS: readonly Check[] = [
       // that round-trips at all. So the check tries to make the bad row.
       // Refusing to create it is conformance — a host whose write path rejects
       // a backdated submission has nothing to prove here, and the seeder
-      // stands in for that path. What is not conformance is accepting the row
-      // and then reporting it, because then the host has a way to produce one
-      // and the queue's early stop is unsound for them.
+      // stands in for that path. What is not conformance is the row being
+      // readable afterwards, which is asked of the store rather than inferred
+      // from whether the seeder threw: a write that persists and then fails
+      // leaves the row just as visible as one that succeeded.
       const { proposalId } = await seed.proposal({
         target: target(h, 'n1'),
         author: human('user:1'),
         createdAt: T1,
       });
-      let ref: ProposalVersionRef;
+      let ref: ProposalVersionRef | null = null;
       try {
         ({ ref } = await seed.version({ proposalId, submittedAt: T0 }));
       } catch {
-        return;
+        // A throw is not the answer on its own. A write that persists and
+        // then fails leaves the row exactly as visible as one that succeeded,
+        // and a seeder can also throw for a reason of its own that says
+        // nothing about this invariant. So the question is the same either
+        // way: is such a row readable now?
       }
-      const version = await store.getVersion(ref);
-      truthy(version, 'getVersion returned null');
+      const version =
+        ref === null ? await store.latestVersion(proposalId) : await store.getVersion(ref);
+      // Nothing was created, so nothing violates anything. The honest result
+      // for a store that refused the write, and the only case a throw settles.
+      if (version === null) return;
       const [proposal] = await store.listOpenProposals(h.space);
       truthy(proposal, 'listOpenProposals returned nothing');
       truthy(
-        version!.submittedAt === null ||
-          version!.submittedAt >= proposal!.createdAt,
-        `a version submitted at ${String(version!.submittedAt)} sits on a ` +
+        version.submittedAt === null ||
+          version.submittedAt >= proposal!.createdAt,
+        `a version submitted at ${String(version.submittedAt)} sits on a ` +
           `proposal created at ${proposal!.createdAt}. Reject the write, ` +
           'normalise the stamp, or the review queue will stop early and ' +
           'serve this row out of order',
