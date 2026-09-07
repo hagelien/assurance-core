@@ -413,16 +413,21 @@ async function overGrowingWindow<T>(
   // config is a caller's bug either way; the difference is between an
   // exception naming the field and a request that never returns, and only one
   // of those can be found from a stack trace.
-  if (!Number.isFinite(cap) || cap < 1) {
+  // Integers, because both are counts of rows. A fractional window is
+  // forwarded to `listOpenProposals` as a fractional `LIMIT`, which every
+  // store answers differently and a SQL one rejects outright; a fractional
+  // limit reaches `slice(0, 0.5)` and returns nothing while the loop believes
+  // it settled. Neither is a number of rows anyone meant.
+  if (!Number.isInteger(cap) || cap < 1) {
     throw new RangeError(
-      `maxCandidateWindow must be a finite number of at least 1, got ${String(
+      `maxCandidateWindow must be an integer of at least 1, got ${String(
         args.maxCandidateWindow,
       )}`,
     );
   }
-  if (!Number.isFinite(args.limit) || args.limit < 0) {
+  if (!Number.isInteger(args.limit) || args.limit < 0) {
     throw new RangeError(
-      `limit must be a finite number of at least 0, got ${String(args.limit)}`,
+      `limit must be an integer of at least 0, got ${String(args.limit)}`,
     );
   }
   // Without this each growth re-reads the prefix and re-hydrates every row in

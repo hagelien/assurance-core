@@ -725,6 +725,38 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     ).rejects.toThrow(RangeError);
   });
 
+  it('rejects a fractional window or batch size', async () => {
+    // Both are counts of rows. A fractional window is forwarded as a
+    // fractional `LIMIT`, which every store answers differently and a SQL one
+    // rejects outright; a fractional limit reaches `slice(0, 0.5)` and returns
+    // nothing while the loop believes it settled — a queue that serves an
+    // empty batch and calls it complete.
+    const store = backlog(5);
+
+    await expect(
+      selectReviewQueueFromStore({
+        store,
+        space: 's',
+        reviewerRef: 'agent:7',
+        limit: 10,
+        maxCandidateWindow: 10.5,
+      }),
+    ).rejects.toThrow(RangeError);
+
+    await expect(
+      selectReviewQueueFromStore({
+        store,
+        space: 's',
+        reviewerRef: 'agent:7',
+        limit: 0.5,
+      }),
+    ).rejects.toThrow(RangeError);
+
+    await expect(
+      candidatesFromStore(store, 's', { limit: 2.5 }),
+    ).rejects.toThrow(RangeError);
+  });
+
   it('does not serve a revised proposal over an older version it has not read', async () => {
     // The store orders by proposal creation; the batch orders by the current
     // version's submission. A proposal revised after a newer one was submitted
