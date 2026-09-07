@@ -757,6 +757,55 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     ).rejects.toThrow(RangeError);
   });
 
+  it('sees a proposal submitted while the window was growing', async () => {
+    // The window is re-read and the store is live underneath it. A proposal
+    // that gains its first submitted version between two passes comes back
+    // from the second read with a `currentVersionId` where the first had none
+    // — and a cache keyed on the proposal id alone answered with the `null` it
+    // learned on the first pass, so the row was missing from the batch this
+    // request served rather than merely late.
+    const store = backlog(30);
+    await judgeFirst(store, 'agent:7', 12);
+    // An unsubmitted proposal, oldest in the space, that gets submitted after
+    // the first read has already hydrated it as having no version. Seeded
+    // after the judging so it is not one of the rows judged.
+    store.seedProposal({
+      proposalId: 'p-late',
+      target: { space: 's', type: 'note', id: 'late' },
+      author: actor('user:1'),
+      createdAt: age(0),
+    });
+
+    let reads = 0;
+    const list = store.listOpenProposals.bind(store);
+    store.listOpenProposals = async (space, query = {}) => {
+      reads += 1;
+      const rows = await list(space, query);
+      // Submitted between the first pass's hydration and the second's: this
+      // spy runs before the hydration of the read it intercepts, so seeding on
+      // the first call would let that same pass see the version and prove
+      // nothing.
+      if (reads === 2) {
+        store.seedVersion({
+          proposalId: 'p-late',
+          versionId: 'v-late',
+          submittedAt: age(0),
+        });
+      }
+      return rows;
+    };
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    expect(reads).toBeGreaterThan(1);
+    expect(result.items.map((i) => i.target.id)).toContain('late');
+  });
+
   it('does not serve a revised proposal over an older version it has not read', async () => {
     // The store orders by proposal creation; the batch orders by the current
     // version's submission. A proposal revised after a newer one was submitted
