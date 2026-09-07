@@ -152,6 +152,35 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'hides a backdated version from getVersion but not from the queue',
+      catchesContaining: 'never older than its own proposal',
+      break(store) {
+        // The row is persisted and `getVersion` cleans it up on the way out,
+        // so a check that asks only that path sees nothing wrong — while
+        // `latestVersion`, the one the queue reads, hands back the backdated
+        // stamp that `settled` then compares.
+        const seed = store.seedVersion.bind(store);
+        store.seedVersion = (input) => {
+          const record = seed({ ...input, submittedAt: undefined });
+          if (input.submittedAt !== undefined) {
+            (record as { submittedAt: string | null }).submittedAt = input.submittedAt;
+          }
+          return record;
+        };
+        const get = store.getVersion.bind(store);
+        store.getVersion = async (ref) => {
+          const version = await get(ref);
+          if (version === null) return null;
+          const proposal = await store.getProposal(ref.proposalId);
+          return proposal !== null &&
+            version.submittedAt !== null &&
+            version.submittedAt < proposal.createdAt
+            ? { ...version, submittedAt: proposal.createdAt }
+            : version;
+        };
+      },
+    },
+    {
       what: 'normalises timestamps on one read path but not the other',
       catchesContaining: 'come back in UTC',
       break(store) {

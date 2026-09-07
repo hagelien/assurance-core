@@ -779,21 +779,35 @@ const CHECKS: readonly Check[] = [
         // nothing about this invariant. So the question is the same either
         // way: is such a row readable now?
       }
-      const version =
-        ref === null ? await store.latestVersion(proposalId) : await store.getVersion(ref);
+      // Both read paths, because they are separately implemented and only one
+      // of them is the queue's: `candidatePage` hydrates through
+      // `latestVersion`, so a row hidden or normalised in `getVersion` and
+      // handed back raw here still reaches `settled`. Asking the path that
+      // states the invariant rather than the path that relies on it is how a
+      // clause certifies a method nothing reads.
+      const found = [
+        ['latestVersion', await store.latestVersion(proposalId)] as const,
+        ...(ref === null
+          ? []
+          : ([['getVersion', await store.getVersion(ref)]] as const)),
+      ];
       // Nothing was created, so nothing violates anything. The honest result
       // for a store that refused the write, and the only case a throw settles.
-      if (version === null) return;
+      if (found.every(([, version]) => version === null)) return;
       const [proposal] = await store.listOpenProposals(h.space);
       truthy(proposal, 'listOpenProposals returned nothing');
-      truthy(
-        version.submittedAt === null ||
-          version.submittedAt >= proposal!.createdAt,
-        `a version submitted at ${String(version.submittedAt)} sits on a ` +
-          `proposal created at ${proposal!.createdAt}. Reject the write, ` +
-          'normalise the stamp, or the review queue will stop early and ' +
-          'serve this row out of order',
-      );
+      for (const [via, version] of found) {
+        if (version === null) continue;
+        truthy(
+          version.submittedAt === null ||
+            version.submittedAt >= proposal!.createdAt,
+          `${via} reports a version submitted at ` +
+            `${String(version.submittedAt)} on a proposal created at ` +
+            `${proposal!.createdAt}. Reject the write, normalise the stamp, ` +
+            'or the review queue will stop early and serve this row out of ' +
+            'order',
+        );
+      }
     },
   },
   {
