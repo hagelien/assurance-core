@@ -288,10 +288,17 @@ async function candidatePage(
     // the prefix, and hydration is one `latestVersion` per row, so without the
     // cache a run to the default cap costs 100 + 200 + 400 + 800 + 1600 + 2000
     // sequential round trips against a store built for real latency.
-    const version =
-      hydrated?.get(proposal.proposalId) ??
-      (await store.latestVersion(proposal.proposalId));
-    hydrated?.set(proposal.proposalId, version);
+    // `has`, not `?? await`: a proposal with no version caches as `null`, and
+    // treating that as a miss re-fetched exactly the rows the cache was added
+    // for — a backlog thick with unsubmitted proposals is what makes the window
+    // grow in the first place.
+    let version: StoredProposalVersion | null;
+    if (hydrated?.has(proposal.proposalId)) {
+      version = hydrated.get(proposal.proposalId) ?? null;
+    } else {
+      version = await store.latestVersion(proposal.proposalId);
+      hydrated?.set(proposal.proposalId, version);
+    }
     // A proposal with no submitted version is not reviewable: there is nothing
     // to show. Skipped rather than shown as excluded, because it never became
     // a candidate in the first place.
@@ -496,11 +503,19 @@ function settled(
   // full fractions here would scan to the cap and report `truncated` over a
   // batch the allocator considers finished.
   let remaining = args.limit;
+  // What earlier entries already claimed of each type. The allocator excludes
+  // items it has taken, so two 50% reserves on one type ask for ten between
+  // them, not five twice — and comparing each entry against the type's whole
+  // count settled on the first entry's worth.
+  const claimed = new Map<TargetType, number>();
   for (const { targetType, fraction } of args.reserves ?? []) {
     if (remaining <= 0) break;
     const want = Math.min(Math.ceil(args.limit * fraction), remaining);
-    const have = provable.filter((i) => i.target.type === targetType).length;
+    const already = claimed.get(targetType) ?? 0;
+    const have =
+      provable.filter((i) => i.target.type === targetType).length - already;
     if (have < want) return false;
+    claimed.set(targetType, already + want);
     remaining -= want;
   }
   return true;

@@ -499,6 +499,41 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     expect(result.items.filter((i) => i.target.type === 'record')).toHaveLength(2);
   });
 
+  it('asks for both halves when one type is reserved twice', async () => {
+    // The allocator excludes what it has already taken, so two 50% note
+    // reserves ask for ten notes between them. Comparing each entry against the
+    // type's whole count settled on the first entry's worth — five — and served
+    // a batch the allocator would have filled differently.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 40; i += 1) {
+      // Notes are scarce near the front and plentiful past it, so a run that
+      // settles on one entry's worth visibly serves fewer of them.
+      const type = i < 5 || i >= 30 ? 'note' : 'record';
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type, id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      reserves: [
+        { targetType: 'note', fraction: 0.5 },
+        { targetType: 'note', fraction: 0.5 },
+      ],
+    });
+
+    expect(result.items.filter((i) => i.target.type === 'note')).toHaveLength(10);
+    expect(result.truncated).toBe(false);
+  });
+
   it('does not settle on a tie at the window boundary', async () => {
     // The boundary guarantee is "every unread proposal was created after the
     // last one read", which at equal timestamps says nothing: an unread row can
