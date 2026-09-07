@@ -800,11 +800,16 @@ const CHECKS: readonly Check[] = [
       truthy(latest, 'latestVersion returned null');
       const [assessment] = await store.currentAssessments(ref);
       truthy(assessment, 'currentAssessments returned nothing');
+      // The sibling read, for the same reason as the two version methods
+      // above: separately implemented, over the same row.
+      const [byActor] = await store.assessmentsByActor('agent:1', [ref]);
+      truthy(byActor, 'assessmentsByActor returned nothing');
       for (const [what, value] of [
         ['proposal createdAt', proposal!.createdAt],
         ['version submittedAt (getVersion)', version!.submittedAt],
         ['version submittedAt (latestVersion)', latest!.submittedAt],
-        ['assessment recordedAt', assessment!.recordedAt],
+        ['assessment recordedAt (currentAssessments)', assessment!.recordedAt],
+        ['assessment recordedAt (assessmentsByActor)', byActor!.recordedAt],
       ] as const) {
         truthy(
           isCanonicalTimestamp(value),

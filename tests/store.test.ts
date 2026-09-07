@@ -118,6 +118,18 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'formats recordedAt correctly in only one of the two reads',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        const byActor = store.assessmentsByActor.bind(store);
+        store.assessmentsByActor = async (actorRef, versions) =>
+          (await byActor(actorRef, versions)).map((a) => ({
+            ...a,
+            recordedAt: a.recordedAt.replace(/\.\d{3}Z$/, '+00:00'),
+          }));
+      },
+    },
+    {
       what: 'returns a shape-correct impossible date',
       catchesContaining: 'come back in UTC',
       break(store) {
