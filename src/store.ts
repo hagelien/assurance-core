@@ -110,7 +110,20 @@ export interface StoredProposalVersion {
   readonly payloadFingerprint: Fingerprint;
   /** 1 for the first version, incrementing on each revision. */
   readonly versionNo: number;
-  /** Null while still a draft. A version is reviewable once submitted. */
+  /**
+   * Null while still a draft. A version is reviewable once submitted.
+   *
+   * Never earlier than its proposal's `createdAt`: a version cannot be
+   * submitted before the proposal it belongs to exists. Stated because a
+   * reader depends on it — `selectReviewQueueFromStore` uses it to know that
+   * nothing it has yet to read can be older than what it holds, which is what
+   * lets it stop before reading a whole backlog. A host importing history must
+   * carry the source's proposal time onto the proposal, not just onto the
+   * version, or that reasoning breaks silently and the queue serves
+   * newest-first while claiming the opposite. The conformance suite asks a
+   * store to create such a row: refusing the write is conformance, and
+   * reporting one back is not.
+   */
   readonly submittedAt: Timestamp | null;
 }
 

@@ -185,6 +185,12 @@ describe('a foreign store satisfies the port', () => {
           };
         },
         async version(input) {
+          // The change request's own instant, not a fixed one: a draft written
+          // before the change that holds it was opened is a row this host
+          // refuses, and a seeder that stamped every draft with the same date
+          // manufactured exactly that whenever the suite asked for a later
+          // proposal.
+          const openedAt = log.change(Number(input.proposalId))!.openedAt;
           const draft = log.addDraft(Number(input.proposalId), {
             title: 't',
             context: 'c',
@@ -193,10 +199,10 @@ describe('a foreign store satisfies the port', () => {
             // seeded by giving it something to supersede.
             supersedes: input.risk?.level === 'high' ? [1] : [],
             writtenBy: 'user:1',
-            writtenAt: new Date('2020-01-01T00:00:00.000Z'),
+            writtenAt: openedAt,
             submittedAt:
               input.submittedAt === undefined
-                ? new Date('2020-01-01T00:00:00.000Z')
+                ? openedAt
                 : input.submittedAt === null
                   ? null
                   : new Date(input.submittedAt),

@@ -681,6 +681,50 @@ const CHECKS: readonly Check[] = [
     },
   },
   {
+    name: 'a submitted version is never older than its own proposal',
+    async run(h) {
+      const { store, seed } = h;
+      // The queue leans on this to stop early. Everything it has not read was
+      // created after the last row it did read, so nothing unread can carry a
+      // version older than that instant — but only if a version is never
+      // submitted before its proposal exists. A store that reports such a row
+      // breaks the proof silently, and the symptom is a queue serving
+      // newest-first while documenting the reverse.
+      //
+      // Asked of the seeder rather than of a well-formed row, because a
+      // well-formed row demonstrates nothing: T1 against T1 holds for anything
+      // that round-trips at all. So the check tries to make the bad row.
+      // Refusing to create it is conformance — a host whose write path rejects
+      // a backdated submission has nothing to prove here, and the seeder
+      // stands in for that path. What is not conformance is accepting the row
+      // and then reporting it, because then the host has a way to produce one
+      // and the queue's early stop is unsound for them.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T1,
+      });
+      let ref: ProposalVersionRef;
+      try {
+        ({ ref } = await seed.version({ proposalId, submittedAt: T0 }));
+      } catch {
+        return;
+      }
+      const version = await store.getVersion(ref);
+      truthy(version, 'getVersion returned null');
+      const [proposal] = await store.listOpenProposals(h.space);
+      truthy(proposal, 'listOpenProposals returned nothing');
+      truthy(
+        version!.submittedAt === null ||
+          version!.submittedAt >= proposal!.createdAt,
+        `a version submitted at ${String(version!.submittedAt)} sits on a ` +
+          `proposal created at ${proposal!.createdAt}. Reject the write, ` +
+          'normalise the stamp, or the review queue will stop early and ' +
+          'serve this row out of order',
+      );
+    },
+  },
+  {
     name: 'an unsubmitted version says so rather than looking reviewable',
     async run(h) {
       const { store, seed } = h;

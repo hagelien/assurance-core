@@ -120,6 +120,23 @@ export class MemoryAssuranceStore implements AssuranceStore {
     if (!proposal) {
       throw new Error(`seedVersion: no proposal ${input.proposalId}`);
     }
+    // A version submitted before its own proposal existed is not a fixture,
+    // it is a fact no host can produce and the review queue's early stop
+    // relies on never seeing: everything the queue has not read was created
+    // after the last row it did read, so an unread row can only carry a newer
+    // version if this holds. Refused here rather than stored, because a
+    // reference implementation that accepts it hands every test written
+    // against it a queue ordering that no conforming store would reproduce.
+    if (
+      input.submittedAt !== undefined &&
+      input.submittedAt !== null &&
+      input.submittedAt < proposal.createdAt
+    ) {
+      throw new Error(
+        `seedVersion: submittedAt ${input.submittedAt} precedes the ` +
+          `createdAt ${proposal.createdAt} of proposal ${input.proposalId}`,
+      );
+    }
     const versionNo = this.versionsOf(input.proposalId).length + 1;
     const versionId = input.versionId ?? this.nextId('version');
     const record: StoredProposalVersion = {

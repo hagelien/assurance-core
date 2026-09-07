@@ -425,9 +425,12 @@ export async function selectReviewQueueFromStore(args: {
   const narrowing = args.targetType === undefined ? {} : { targetType: args.targetType };
   const cap = args.maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
   const hydrated = new Map<string, StoredProposalVersion | null>();
-  // Never below `limit`: serving a batch of `limit` requires reading at least
-  // that many, and a cap under it could only ever starve the batch.
-  let window = Math.max(args.limit, 1);
+  // `limit` rows to serve `limit`, but never past the cap. A caller asking for
+  // more than the ceiling allows is asking for something the ceiling forbids,
+  // and reading 10,000 rows because the limit said so would make the cap
+  // decorative — it exists to bound the work one request can do. Such a call
+  // gets the batch the cap permits, and `truncated` says the search stopped.
+  let window = Math.min(Math.max(args.limit, 1), cap);
   for (;;) {
     const page = await candidatePage(
       args.store,
@@ -479,7 +482,7 @@ export async function selectReviewQueueFromStore(args: {
 function settled(
   selection: ReviewQueueResult,
   page: CandidatePage,
-  args: { limit: number; reserves?: readonly TypeReserve[] },
+  args: { limit: number; reserves?: readonly TypeReserve[]; targetType?: TargetType },
 ): boolean {
   const through = page.readThrough;
   // Strictly older, not "at or older". At equality the guarantee runs out: an
@@ -510,6 +513,11 @@ function settled(
   const claimed = new Map<TargetType, number>();
   for (const { targetType, fraction } of args.reserves ?? []) {
     if (remaining <= 0) break;
+    // A reserve for a type the query cannot return is not unmet, it is
+    // inapplicable: narrowing to notes and reserving records, the store will
+    // never produce one however far the window grows, so waiting for it means
+    // scanning to the cap and calling a complete batch truncated.
+    if (args.targetType !== undefined && targetType !== args.targetType) continue;
     const want = Math.min(Math.ceil(args.limit * fraction), remaining);
     const already = claimed.get(targetType) ?? 0;
     const have =

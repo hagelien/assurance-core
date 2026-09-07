@@ -602,6 +602,71 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     expect(result.truncated).toBe(false);
   });
 
+  it('reads no further than the cap when the limit asks for more', async () => {
+    // The cap is a bound on the work one request may do, and a caller asking
+    // for more rows than it allows is asking for something it forbids. Seeding
+    // the window from `limit` alone made the ceiling decorative: a `limit` of
+    // 40 read 40 rows on the first pass and never consulted the cap at all,
+    // which is the resource bound off by however large the caller's number is.
+    const store = backlog(60);
+    let widest = 0;
+    const list = store.listOpenProposals.bind(store);
+    store.listOpenProposals = async (space, query = {}) => {
+      widest = Math.max(widest, query.limit ?? Number.POSITIVE_INFINITY);
+      return list(space, query);
+    };
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 40,
+      maxCandidateWindow: 20,
+    });
+
+    // The cap plus the one sentinel row that tells an exhausted space from a
+    // capped read — never the caller's 40.
+    expect(widest).toBe(21);
+    // The batch the cap permits, and `truncated` says the search stopped —
+    // which is the honest report, not a silently short answer.
+    expect(result.items).toHaveLength(20);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('ignores a reserve for a type the narrowing has already excluded', async () => {
+    // Narrowed to notes and reserving records, the store will never produce a
+    // record however far the window grows. Treating that as an unmet reserve
+    // means scanning to the cap and reporting `truncated` over a batch that is
+    // complete — the flag's own distinction inverted, on a query the caller
+    // wrote deliberately.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 40; i += 1) {
+      const type = i % 4 === 3 ? 'record' : 'note';
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type, id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      targetType: 'note',
+      maxCandidateWindow: 20,
+      reserves: [{ targetType: 'record', fraction: 0.2 }],
+    });
+
+    expect(result.items).toHaveLength(10);
+    expect(result.items.every((i) => i.target.type === 'note')).toBe(true);
+    expect(result.truncated).toBe(false);
+  });
+
   it('does not serve a revised proposal over an older version it has not read', async () => {
     // The store orders by proposal creation; the batch orders by the current
     // version's submission. A proposal revised after a newer one was submitted
@@ -682,11 +747,14 @@ describe('candidatesFromStore — limit counts candidates, not rows read', () =>
         author: actor('user:1'),
         createdAt: T(i + 1),
       });
-      // Every third one is submitted; the rest are drafts with no version to show.
+      // Every third one is submitted; the rest are drafts with no version to
+      // show. Submitted at its own proposal's instant, never before it: the
+      // store refuses a backdated submission, and the queue's early stop is
+      // the reason.
       store.seedVersion({
         proposalId: `p-${id}`,
         versionId: `v-${id}`,
-        ...(i % 3 === 0 ? { submittedAt: T(1) } : { submittedAt: null }),
+        ...(i % 3 === 0 ? { submittedAt: T(i + 1) } : { submittedAt: null }),
       });
     }
 
