@@ -32,7 +32,7 @@
  * their own work.
  */
 
-import type { AssuranceStore, Timestamp } from './store.js';
+import type { AssuranceStore, StoredProposalVersion, Timestamp } from './store.js';
 import { formatVersionRef } from './store.js';
 import type { ProposalVersionRef, SpaceId, TargetRef, TargetType } from './types.js';
 
@@ -252,12 +252,23 @@ interface CandidatePage {
   readonly examinedProposals: number;
   /** The store returned fewer proposals than asked for: there are no more. */
   readonly exhausted: boolean;
+  /**
+   * The creation time of the last proposal read, or null for an empty page.
+   *
+   * The store orders by proposal creation, so every proposal *not* read was
+   * created after this — and a version is never submitted before its proposal
+   * exists. So every unread row's version is newer than this instant, which is
+   * what lets the caller know when it has provably found the oldest work
+   * without reading the whole backlog.
+   */
+  readonly readThrough: Timestamp | null;
 }
 
 async function candidatePage(
   store: AssuranceStore,
   space: SpaceId,
   query: { targetType?: TargetType; limit?: number },
+  hydrated?: Map<string, StoredProposalVersion | null>,
 ): Promise<CandidatePage> {
   const { limit, ...narrowing } = query;
   // One row past the window, and only to answer "is there more?".
@@ -273,7 +284,14 @@ async function candidatePage(
   const proposals = limit === undefined ? read : read.slice(0, limit);
   const candidates: ReviewCandidate[] = [];
   for (const proposal of proposals) {
-    const version = await store.latestVersion(proposal.proposalId);
+    // Hydrated once per proposal across a growing window. Each growth re-reads
+    // the prefix, and hydration is one `latestVersion` per row, so without the
+    // cache a run to the default cap costs 100 + 200 + 400 + 800 + 1600 + 2000
+    // sequential round trips against a store built for real latency.
+    const version =
+      hydrated?.get(proposal.proposalId) ??
+      (await store.latestVersion(proposal.proposalId));
+    hydrated?.set(proposal.proposalId, version);
     // A proposal with no submitted version is not reviewable: there is nothing
     // to show. Skipped rather than shown as excluded, because it never became
     // a candidate in the first place.
@@ -286,6 +304,7 @@ async function candidatePage(
       visible: true,
     });
   }
+  const last = proposals.at(-1);
   return {
     candidates,
     examinedProposals: proposals.length,
@@ -294,6 +313,7 @@ async function candidatePage(
     // short *candidate* count alone would loop forever against a space whose
     // oldest rows have no submitted version.
     exhausted: limit === undefined || read.length <= limit,
+    readThrough: last?.createdAt ?? null,
   };
 }
 
@@ -389,14 +409,17 @@ export async function selectReviewQueueFromStore(args: {
 }): Promise<StoreReviewQueueResult> {
   const narrowing = args.targetType === undefined ? {} : { targetType: args.targetType };
   const cap = args.maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
+  const hydrated = new Map<string, StoredProposalVersion | null>();
   // Never below `limit`: serving a batch of `limit` requires reading at least
   // that many, and a cap under it could only ever starve the batch.
   let window = Math.max(args.limit, 1);
   for (;;) {
-    const page = await candidatePage(args.store, args.space, {
-      ...narrowing,
-      limit: window,
-    });
+    const page = await candidatePage(
+      args.store,
+      args.space,
+      { ...narrowing, limit: window },
+      hydrated,
+    );
     const selection = await selectReviewQueue({
       store: args.store,
       reviewerRef: args.reviewerRef,
@@ -407,10 +430,51 @@ export async function selectReviewQueueFromStore(args: {
         : { selfReviewEnabled: args.selfReviewEnabled }),
       ...(args.reserves === undefined ? {} : { reserves: args.reserves }),
     });
-    if (selection.items.length >= args.limit || page.exhausted) {
+    if (page.exhausted || settled(selection, page, args)) {
       return { ...selection, truncated: false };
     }
     if (window >= cap) return { ...selection, truncated: true };
     window = Math.min(window * 2, cap);
   }
+}
+
+/**
+ * Whether this window has provably found the batch, or only filled it.
+ *
+ * Two things a full batch does not by itself establish, both of which cost
+ * nothing to check and were wrong without the check.
+ *
+ * **The batch is the oldest work.** The store orders by proposal creation and
+ * the batch orders by the current version's submission — different keys, and a
+ * proposal revised after a newer one was submitted carries a version younger
+ * than its position suggests. So a full window can hold `limit` recently
+ * revised rows while an older *version* sits on a proposal just outside it.
+ * What the store's ordering does guarantee is that every unread proposal was
+ * created after `readThrough`, and no version predates its own proposal — so
+ * an item submitted at or before `readThrough` cannot be beaten by anything
+ * unread. Once `limit` of those are in hand the batch is settled; until then a
+ * fuller window can still change it.
+ *
+ * **A reserve is met.** `selectReviewBatch` allocates the reserve out of the
+ * candidates it is given, so a window whose first `limit` eligible rows are all
+ * one type fills the batch and silently serves the reserved type nothing —
+ * which is precisely the starvation reserves exist to prevent, arriving through
+ * the stopping rule instead of the selection.
+ */
+function settled(
+  selection: ReviewQueueResult,
+  page: CandidatePage,
+  args: { limit: number; reserves?: readonly TypeReserve[] },
+): boolean {
+  const through = page.readThrough;
+  const provable = selection.items.filter(
+    (item) => through !== null && item.createdAt <= through,
+  );
+  if (provable.length < args.limit) return false;
+  for (const { targetType, fraction } of args.reserves ?? []) {
+    const want = Math.min(Math.ceil(args.limit * fraction), args.limit);
+    const have = provable.filter((i) => i.target.type === targetType).length;
+    if (have < want) return false;
+  }
+  return true;
 }

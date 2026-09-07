@@ -469,6 +469,79 @@ describe('selectReviewQueueFromStore — the window has to outlast the rules', (
     expect(result.truncated).toBe(false);
   });
 
+  it('keeps growing until a reserved type has been looked for', async () => {
+    // The starvation `reserves` exists to prevent, arriving through the
+    // stopping rule instead of the selection: the first ten eligible rows are
+    // all notes, so the batch fills, and the reserved type is never read at
+    // all. `selectReviewBatch` can only allocate out of what it is given.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 30; i += 1) {
+      const type = i < 10 ? 'note' : 'record';
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type, id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      reserves: [{ targetType: 'record', fraction: 0.2 }],
+    });
+
+    expect(result.items).toHaveLength(10);
+    expect(result.items.filter((i) => i.target.type === 'record')).toHaveLength(2);
+  });
+
+  it('does not serve a revised proposal over an older version it has not read', async () => {
+    // The store orders by proposal creation; the batch orders by the current
+    // version's submission. A proposal revised after a newer one was submitted
+    // carries a version younger than its position suggests, so a full window of
+    // recently revised rows can hide an older *version* on a proposal just
+    // outside it — and the queue would serve newest-first while claiming the
+    // opposite.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 10; i += 1) {
+      const id = `old${i}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      // Created early, revised late: the version is what the queue orders on.
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(100 + i) });
+    }
+    store.seedProposal({
+      proposalId: 'p-untouched',
+      target: { space: 's', type: 'note', id: 'untouched' },
+      author: actor('user:1'),
+      createdAt: age(10),
+    });
+    store.seedVersion({
+      proposalId: 'p-untouched',
+      versionId: 'v-untouched',
+      submittedAt: age(10),
+    });
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    // The oldest version in the space, and it sat one row past the first window.
+    expect(result.items.map((i) => i.target.id)).toContain('untouched');
+    expect(result.items[0]!.target.id).toBe('untouched');
+  });
+
   it('counts the final window, not the sum of the re-reads', async () => {
     // `examined` is a diagnostic a host compares against another queue's. A
     // prefix read three times was not three candidates, and reporting it as
