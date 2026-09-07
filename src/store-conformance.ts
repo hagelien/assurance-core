@@ -817,11 +817,16 @@ const CHECKS: readonly Check[] = [
       // one caller happens to compare would leave the rest free to be written
       // any way at all — and a host normalising per call site rather than at
       // the adapter boundary is exactly how the offsets get in.
+      // At the submission instant, not before it. A version cannot be
+      // disputed before it was submitted, and an adapter that enforces that —
+      // as this suite now asks them to for `submittedAt` against `createdAt` —
+      // would reject the fixture and fail this check for a reason that has
+      // nothing to do with timestamp representation.
       const dispute = await store.openDispute({
         version: ref,
         openedByRef: 'user:2',
         openedByKind: 'human',
-        openedAt: T1,
+        openedAt: T2,
       });
       const appendedRuling = await store.ruleDispute({
         disputeId: dispute.disputeId,

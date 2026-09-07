@@ -291,16 +291,33 @@ async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  const state: { failure?: { error: unknown } } = {};
   const worker = async (): Promise<void> => {
     for (;;) {
+      // The first failure stops the pool taking new work. `Promise.all` alone
+      // rejects the moment one worker does, and the others carry on pulling
+      // indices behind a caller that has already been handed the error — a
+      // failed request near the front of a 2,000-row window would go on
+      // issuing almost the whole window against a store that is, on the
+      // evidence, already in trouble.
+      if (state.failure !== undefined) return;
       const index = next++;
       if (index >= items.length) return;
-      results[index] = await fn(items[index]!);
+      try {
+        results[index] = await fn(items[index]!);
+      } catch (error) {
+        state.failure ??= { error };
+        return;
+      }
     }
   };
+  // Workers swallow their own rejection, so this settles rather than racing:
+  // by the time it resolves nothing is still in flight, and the caller is not
+  // handed an error while reads it started are still outstanding.
   await Promise.all(
     Array.from({ length: Math.min(limit, items.length) }, () => worker()),
   );
+  if (state.failure !== undefined) throw state.failure.error;
   return results;
 }
 

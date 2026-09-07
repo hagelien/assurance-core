@@ -944,6 +944,39 @@ describe('growing re-reads cost a bounded multiple, and carry nothing forward', 
     );
   });
 
+  it('stops the pool when a read fails instead of draining the window', async () => {
+    // `Promise.all` rejects the moment one worker does, and the others carry
+    // on pulling indices behind a caller already holding the error. A failure
+    // near the front of a wide window would go on issuing nearly the whole
+    // window against a store that is, on the evidence, already in trouble.
+    const { store } = sparse();
+    let calls = 0;
+    const latest = store.latestVersion.bind(store);
+    store.latestVersion = async (proposalId) => {
+      calls += 1;
+      const mine = calls;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (mine === 3) throw new Error('store unavailable');
+      return latest(proposalId);
+    };
+
+    await expect(
+      candidatesFromStore(store, 's', { limit: 20 }),
+    ).rejects.toThrow('store unavailable');
+
+    // Measured after a drain, not at the rejection: orphaned workers keep
+    // pulling indices *after* the caller has its error, so counting
+    // immediately would show a small number whether or not the pool stopped.
+    const atRejection = calls;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The eight already in flight when it failed, plus the few that had
+    // already come back and taken another index — not the 400-row window.
+    expect(calls).toBeLessThan(20);
+    // And nothing kept running once the caller had been answered.
+    expect(calls).toBe(atRejection);
+  });
+
   it('when growing to fill a candidate count', async () => {
     const { store, asked } = sparse();
     await candidatesFromStore(store, 's', { limit: 50 });
