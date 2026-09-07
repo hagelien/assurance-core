@@ -762,6 +762,39 @@ describe('candidatesFromStore — limit counts candidates, not rows read', () =>
     expect(candidates.map((c) => c.target.id)).toEqual(['n0', 'n3', 'n6']);
   });
 
+  it('reads no further than the cap when the count asks for more', async () => {
+    // The other growing loop, with the same defect the selector had: seeding
+    // the window from `limit` meant a caller could step over the ceiling just
+    // by asking for more than it allows, and the first read went straight past
+    // it before the cap was ever consulted.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 60; i += 1) {
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: T(1),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: T(1) });
+    }
+    let widest = 0;
+    const list = store.listOpenProposals.bind(store);
+    store.listOpenProposals = async (space, query = {}) => {
+      widest = Math.max(widest, query.limit ?? Number.POSITIVE_INFINITY);
+      return list(space, query);
+    };
+
+    const candidates = await candidatesFromStore(store, 's', {
+      limit: 40,
+      maxCandidateWindow: 20,
+    });
+
+    // The cap plus the one sentinel row, never the caller's 40.
+    expect(widest).toBe(21);
+    expect(candidates).toHaveLength(20);
+  });
+
   it('returns what there is when the space runs out first', async () => {
     const store = new MemoryAssuranceStore();
     store.seedProposal({

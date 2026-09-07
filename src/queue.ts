@@ -358,7 +358,15 @@ export async function candidatesFromStore(
   // This loop grows too, so it needs the same cache: without one, growing past
   // unsubmitted rows re-hydrates the whole prefix on every doubling.
   const hydrated = new Map<string, StoredProposalVersion | null>();
-  let window = limit;
+  // Clamped for the same reason the queue selector's is: the ceiling bounds
+  // the work one call may do, and seeding the window from `limit` alone let a
+  // caller step over it just by asking for more than it allows. Unlike the
+  // selector this returns no `truncated`, so a clamped call is a short list
+  // with nothing to distinguish it from an exhausted space — the same silence
+  // the loop already produces on reaching the cap by doubling, which is why
+  // {@link selectReviewQueueFromStore} is the function to call when the answer
+  // has to say which of the two it is.
+  let window = Math.min(limit, cap);
   for (;;) {
     const page = await candidatePage(
       store,
