@@ -152,6 +152,25 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'trims trailing zeros off its timestamps',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // Still UTC, still Z-suffixed, still valid ISO-8601 — and `00.1Z`
+        // sorts after `00.11Z` because `Z` is above the digits, so rows a few
+        // milliseconds apart come back in the wrong order. A formatter that
+        // drops insignificant zeros is an ordinary thing to write.
+        const list = store.listOpenProposals.bind(store);
+        store.listOpenProposals = async (space, query) =>
+          (await list(space, query)).map((p) => ({
+            ...p,
+            createdAt: p.createdAt.replace(
+              /\.(\d+)Z$/,
+              (_all, digits: string) => `.${digits.replace(/0+$/, '') || '0'}Z`,
+            ),
+          }));
+      },
+    },
+    {
       what: 'reports a version submitted before its own proposal existed',
       catchesContaining: 'never older than its own proposal',
       break(store) {

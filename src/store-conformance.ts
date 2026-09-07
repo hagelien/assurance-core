@@ -154,8 +154,15 @@ const T2 = '2020-01-03T00:00:00.000Z';
  */
 const UNKNOWN = '__conformance_no_such_id__';
 
-/** The one timestamp shape whose lexical order is its chronological order. */
-const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+/**
+ * The one timestamp shape whose lexical order is its chronological order.
+ *
+ * Milliseconds are required at a fixed width, not merely permitted: `.1Z` and
+ * `.11Z` are 10 ms apart and sort the other way round, because `Z` is above
+ * the digits. Exactly three is what `Date.prototype.toISOString` emits, so a
+ * host that formats with it is already conforming.
+ */
+const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const human = (actorRef: string): ActorSnapshot => ({
   actorRef,
@@ -721,9 +728,11 @@ const CHECKS: readonly Check[] = [
         truthy(
           typeof value === 'string' && UTC_TIMESTAMP.test(value),
           `${what} is ${JSON.stringify(value)}, not a Z-suffixed UTC ` +
-            'ISO-8601 instant. Normalise on the way out of the adapter: ' +
-            'these strings are compared directly, and an offset makes ' +
-            'lexical order disagree with chronological order',
+            'ISO-8601 instant with milliseconds (2020-01-01T00:00:00.000Z). ' +
+            'Normalise on the way out of the adapter — `toISOString()` ' +
+            'already emits this: these strings are compared directly, and ' +
+            'both an offset and a varying fractional width make lexical ' +
+            'order disagree with chronological order',
         );
       }
     },
