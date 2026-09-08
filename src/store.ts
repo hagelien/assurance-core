@@ -52,9 +52,30 @@
  *
  * ## Timestamps
  *
- * ISO-8601 strings, assigned by the host, never read by the core for anything
- * but ordering and display. This package reads no clock — see the build
- * config — so a record's time is something it is told, not something it knows.
+ * ISO-8601 strings **in UTC, `Z`-suffixed, with milliseconds** — the form
+ * `Date.prototype.toISOString` emits — assigned by the host, never read
+ * by the core for anything but ordering and display. This package reads no
+ * clock — see the build config — so a record's time is something it is told,
+ * not something it knows.
+ *
+ * The representation is pinned because both this package and a store's own
+ * `listOpenProposals` ordering compare these strings directly, and lexical
+ * order equals chronological order only within one of them. Mix them and the
+ * two disagree silently: `2020-01-01T01:00:00+01:00` is the same instant as
+ * `00:00:00Z` and sorts after it, so a queue reports oldest-first while
+ * serving something else, and the review queue's early stop — which certifies
+ * a batch by comparing a submission against a creation time — certifies the
+ * wrong one.
+ *
+ * The fractional width is part of it, which is less obvious than the offset:
+ * `00.1Z` and `00.11Z` are 10 ms apart and sort the other way round, because
+ * `Z` is above the digits. So a host that trims trailing zeros inverts pairs
+ * of rows a few milliseconds apart, which is precisely the spacing rows
+ * written by one import or one busy second have.
+ *
+ * Normalising on the way out of the adapter is one call — `toISOString()` is
+ * already this form — and defending every comparison against representations
+ * nobody needs is not.
  */
 
 import type { ActorKind, ActorSnapshot } from './actors.js';
@@ -75,7 +96,15 @@ import type {
   TargetType,
 } from './types.js';
 
-/** An ISO-8601 instant, as the host recorded it. */
+/**
+ * An ISO-8601 instant in UTC with milliseconds — `2020-01-01T00:00:00.000Z`.
+ *
+ * The exact shape is part of the contract, not a formatting preference: these
+ * strings are compared directly, and lexical order is chronological order only
+ * within one representation — the offset and the fractional width both. See
+ * the Timestamps section above. The conformance suite checks what a store
+ * hands back.
+ */
 export type Timestamp = string;
 
 /**
@@ -110,7 +139,20 @@ export interface StoredProposalVersion {
   readonly payloadFingerprint: Fingerprint;
   /** 1 for the first version, incrementing on each revision. */
   readonly versionNo: number;
-  /** Null while still a draft. A version is reviewable once submitted. */
+  /**
+   * Null while still a draft. A version is reviewable once submitted.
+   *
+   * Never earlier than its proposal's `createdAt`: a version cannot be
+   * submitted before the proposal it belongs to exists. Stated because a
+   * reader depends on it — `selectReviewQueueFromStore` uses it to know that
+   * nothing it has yet to read can be older than what it holds, which is what
+   * lets it stop before reading a whole backlog. A host importing history must
+   * carry the source's proposal time onto the proposal, not just onto the
+   * version, or that reasoning breaks silently and the queue serves
+   * newest-first while claiming the opposite. The conformance suite asks a
+   * store to create such a row: refusing the write is conformance, and
+   * reporting one back is not.
+   */
   readonly submittedAt: Timestamp | null;
 }
 

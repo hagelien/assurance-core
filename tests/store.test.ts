@@ -104,6 +104,113 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'drops the implicit flag from assessmentsByActor only',
+      catchesContaining: 'assessmentsByActor answers for many versions',
+      break(store) {
+        // `judgedVersions` reads this method and skips implicit rows. Lose the
+        // flag here and a self-reviewing author's own submit-time stake counts
+        // as a judgment, so their work disappears from their own queue — the
+        // failure the self-review grant exists to prevent, on a store whose
+        // `currentAssessments` is perfectly correct.
+        const byActor = store.assessmentsByActor.bind(store);
+        store.assessmentsByActor = async (actorRef, versions) =>
+          (await byActor(actorRef, versions)).map((a) => ({ ...a, implicit: false }));
+      },
+    },
+    {
+      what: 'formats recordedAt correctly in only one of the two reads',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        const byActor = store.assessmentsByActor.bind(store);
+        store.assessmentsByActor = async (actorRef, versions) =>
+          (await byActor(actorRef, versions)).map((a) => ({
+            ...a,
+            recordedAt: a.recordedAt.replace(/\.\d{3}Z$/, '+00:00'),
+          }));
+      },
+    },
+    {
+      what: 'normalises createdAt for the listing but not for getProposal',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        const get = store.getProposal.bind(store);
+        store.getProposal = async (proposalId) => {
+          const found = await get(proposalId);
+          return found === null
+            ? null
+            : { ...found, createdAt: `${found.createdAt.slice(0, 19)}+00:00` };
+        };
+      },
+    },
+    {
+      what: 'formats what it returns from a write differently from what it stores',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // Persisted canonically, handed back with an offset. A caller that
+        // uses the returned row directly — which is why these methods return
+        // it — never reads the correct value at all.
+        const record = store.recordAssessment.bind(store);
+        store.recordAssessment = async (input) => {
+          const stored = await record(input);
+          return { ...stored, recordedAt: `${stored.recordedAt.slice(0, 19)}+00:00` };
+        };
+      },
+    },
+    {
+      what: 'formats dispute and decision timestamps with an offset',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // The contract is on the type, so it holds for every row the port
+        // returns — not only the three the review queue happens to compare.
+        // A host that normalises per call site instead of at the adapter
+        // boundary leaves the rest looking like this.
+        const offset = (t: string): string =>
+          `${t.slice(0, 19)}+00:00`;
+        const disputes = store.disputes.bind(store);
+        store.disputes = async (ref) =>
+          (await disputes(ref)).map((d) => ({ ...d, openedAt: offset(d.openedAt) }));
+        const decision = store.latestDecision.bind(store);
+        store.latestDecision = async (ref) => {
+          const found = await decision(ref);
+          return found === null
+            ? null
+            : { ...found, evaluatedAt: offset(found.evaluatedAt) };
+        };
+      },
+    },
+    {
+      what: 'returns a shape-correct impossible date',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // Matches the pattern to the character and is not a date. Ordering it
+        // against real instants is meaningless in either direction.
+        const list = store.listOpenProposals.bind(store);
+        store.listOpenProposals = async (space, query) =>
+          (await list(space, query)).map((p) => ({
+            ...p,
+            createdAt: '2020-99-99T99:99:99.999Z',
+          }));
+      },
+    },
+    {
+      what: 'supersedes in currentAssessments but not in assessmentsByActor',
+      catchesContaining: 'assessmentsByActor answers for many versions',
+      break(store) {
+        // Two methods over one history. The review queue reads this one, so a
+        // store that applies the standing rule only in its sibling looks
+        // right to anything that asks the sibling.
+        const dump = store.dump.bind(store);
+        store.assessmentsByActor = async (actorRef, versions) => {
+          const wanted = new Set(versions.map((v) => `${v.proposalId}/${v.versionId}`));
+          return dump().assessments.filter(
+            (a) =>
+              a.assessorRef === actorRef &&
+              wanted.has(`${a.version.proposalId}/${a.version.versionId}`),
+          );
+        };
+      },
+    },
+    {
       what: 'ignores the version an assessment was cast against',
       catchesContaining: 'scoped to the version',
       break(store) {
@@ -127,6 +234,130 @@ describe('the contract has teeth', () => {
         store.recordAssessment = async (input) => {
           const { assuranceCapabilities: _dropped, ...rest } = input;
           return record(rest);
+        };
+      },
+    },
+    {
+      what: 'reports timestamps with an offset instead of in UTC',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // The realistic bug: an adapter that formats in the server's local
+        // zone. Nothing throws, every string is valid ISO-8601, and lexical
+        // comparison silently stops agreeing with chronological order.
+        const shift = (t: string | null): string | null =>
+          t === null
+            ? null
+            : new Date(new Date(t).getTime() + 3_600_000)
+                .toISOString()
+                .replace(/\.\d+Z$/, '+01:00');
+        const list = store.listOpenProposals.bind(store);
+        store.listOpenProposals = async (space, query) =>
+          (await list(space, query)).map((p) => ({
+            ...p,
+            createdAt: shift(p.createdAt)!,
+          }));
+      },
+    },
+    {
+      what: 'hides a backdated version from getVersion but not from the queue',
+      catchesContaining: 'never older than its own proposal',
+      break(store) {
+        // The row is persisted and `getVersion` cleans it up on the way out,
+        // so a check that asks only that path sees nothing wrong — while
+        // `latestVersion`, the one the queue reads, hands back the backdated
+        // stamp that `settled` then compares.
+        const seed = store.seedVersion.bind(store);
+        store.seedVersion = (input) => {
+          const record = seed({ ...input, submittedAt: undefined });
+          if (input.submittedAt !== undefined) {
+            (record as { submittedAt: string | null }).submittedAt = input.submittedAt;
+          }
+          return record;
+        };
+        const get = store.getVersion.bind(store);
+        store.getVersion = async (ref) => {
+          const version = await get(ref);
+          if (version === null) return null;
+          const proposal = await store.getProposal(ref.proposalId);
+          return proposal !== null &&
+            version.submittedAt !== null &&
+            version.submittedAt < proposal.createdAt
+            ? { ...version, submittedAt: proposal.createdAt }
+            : version;
+        };
+      },
+    },
+    {
+      what: 'normalises timestamps on one read path but not the other',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // Two methods, two implementations. The review queue reads only
+        // `latestVersion`, so a `getVersion` that formats correctly proves
+        // nothing about the value that actually reaches the comparison.
+        const latest = store.latestVersion.bind(store);
+        store.latestVersion = async (proposalId) => {
+          const version = await latest(proposalId);
+          if (version === null || version.submittedAt === null) return version;
+          return {
+            ...version,
+            submittedAt: new Date(new Date(version.submittedAt).getTime() + 3_600_000)
+              .toISOString()
+              .replace(/\.\d+Z$/, '+01:00'),
+          };
+        };
+      },
+    },
+    {
+      what: 'trims trailing zeros off its timestamps',
+      catchesContaining: 'come back in UTC',
+      break(store) {
+        // Still UTC, still Z-suffixed, still valid ISO-8601 — and `00.1Z`
+        // sorts after `00.11Z` because `Z` is above the digits, so rows a few
+        // milliseconds apart come back in the wrong order. A formatter that
+        // drops insignificant zeros is an ordinary thing to write.
+        const list = store.listOpenProposals.bind(store);
+        store.listOpenProposals = async (space, query) =>
+          (await list(space, query)).map((p) => ({
+            ...p,
+            createdAt: p.createdAt.replace(
+              /\.(\d+)Z$/,
+              (_all, digits: string) => `.${digits.replace(/0+$/, '') || '0'}Z`,
+            ),
+          }));
+      },
+    },
+    {
+      what: 'reports a version submitted before its own proposal existed',
+      catchesContaining: 'never older than its own proposal',
+      break(store) {
+        // The seeder stands in for the host's write path, so a store that
+        // accepts the row is one that can produce it. Here the guard is
+        // bypassed after the fact, which is what an import writing straight to
+        // the table would amount to.
+        const seed = store.seedVersion.bind(store);
+        store.seedVersion = (input) => {
+          const record = seed({ ...input, submittedAt: undefined });
+          if (input.submittedAt !== undefined) {
+            (record as { submittedAt: string | null }).submittedAt =
+              input.submittedAt;
+          }
+          return record;
+        };
+      },
+    },
+    {
+      what: 'persists a backdated version and then throws',
+      catchesContaining: 'never older than its own proposal',
+      break(store) {
+        // The failure a bare `catch { return }` reads as conformance: the row
+        // is written and the write then fails, so it is exactly as visible as
+        // one that succeeded. A partially-applied import looks like this.
+        const seed = store.seedVersion.bind(store);
+        store.seedVersion = (input) => {
+          const record = seed({ ...input, submittedAt: undefined });
+          if (input.submittedAt === undefined) return record;
+          (record as { submittedAt: string | null }).submittedAt = input.submittedAt;
+          throw new Error('write failed after the row was persisted');
         };
       },
     },

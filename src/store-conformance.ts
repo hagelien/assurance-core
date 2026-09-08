@@ -154,6 +154,57 @@ const T2 = '2020-01-03T00:00:00.000Z';
  */
 const UNKNOWN = '__conformance_no_such_id__';
 
+/**
+ * The one timestamp shape whose lexical order is its chronological order.
+ *
+ * Milliseconds are required at a fixed width, not merely permitted: `.1Z` and
+ * `.11Z` are 10 ms apart and sort the other way round, because `Z` is above
+ * the digits. Exactly three is what `Date.prototype.toISOString` emits, so a
+ * host that formats with it is already conforming.
+ */
+const UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/**
+ * The shape *and* a real instant.
+ *
+ * `2020-99-99T99:99:99.999Z` matches the pattern and is not a date, so the
+ * pattern alone certifies a value the contract calls an ISO-8601 instant when
+ * it is only ISO-8601-shaped. Ordering such a value against real ones is
+ * meaningless in either direction, and a store returning one is broken in a
+ * way the suite should say out loud.
+ *
+ * Checked by arithmetic rather than by round-tripping through the `Date`
+ * constructor, which would be the shorter way to write it: this package reads
+ * no clock, and the guard enforcing that is a lexical one — it cannot tell a
+ * parse of a string from a read of the clock, because they are spelled the
+ * same. A guard relaxed to admit the constructor for parsing no longer
+ * excludes the read, so the few lines of month lengths below are the cheaper
+ * of the two costs.
+ */
+function isCanonicalTimestamp(value: unknown): boolean {
+  if (typeof value !== 'string' || !UTC_TIMESTAMP.test(value)) return false;
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  const hour = Number(value.slice(11, 13));
+  const minute = Number(value.slice(14, 16));
+  const second = Number(value.slice(17, 19));
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > daysInMonth(year, month)) return false;
+  // 23:59:60 is a real ISO-8601 leap second and not a value any store here
+  // produces, so it is rejected with the rest: the contract is what
+  // `toISOString` emits, and that never renders one.
+  return hour <= 23 && minute <= 59 && second <= 59;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    return leap ? 29 : 28;
+  }
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
 const human = (actorRef: string): ActorSnapshot => ({
   actorRef,
   kind: 'human',
@@ -484,11 +535,47 @@ const CHECKS: readonly Check[] = [
         assessorRef: 'agent:8',
         assessorKind: 'agent',
         verdict: 'approve',
-        recordedAt: T0,
+        // T1, not T0: this version sits on the proposal created at T1, so its
+        // version was submitted at T1 and an assessment recorded at T0 would
+        // predate the thing it assesses.
+        recordedAt: T1,
       });
       const mine = await store.assessmentsByActor('agent:7', [a.ref, b.ref]);
       equal(mine.length, 1, 'assessments for the named actor only');
       equal(mine[0]!.version, a.ref, 'which version');
+      // The standing rule holds here too, and is asserted here rather than
+      // only on `currentAssessments`, because the two are separate methods
+      // over the same history and the review queue reads this one. A store
+      // that superseded correctly in one and returned raw history from the
+      // other would satisfy a suite that only ever asked the other.
+      await store.recordAssessment({
+        version: a.ref,
+        assessorRef: 'agent:7',
+        assessorKind: 'agent',
+        verdict: 'dispute',
+        recordedAt: T1,
+      });
+      const revised = await store.assessmentsByActor('agent:7', [a.ref, b.ref]);
+      equal(revised.length, 1, 'a revised verdict is one standing assessment');
+      equal(revised[0]!.verdict, 'dispute', 'the standing verdict');
+      // And the implicit flag survives this path, not only the other one.
+      // `judgedVersions` reads here and skips implicit rows, because an
+      // author's submit-time stake is a claim of authorship rather than a
+      // judgment. A store that dropped the flag here would make every
+      // self-reviewing author's own work vanish from their own queue — the
+      // exact failure the self-review grant exists to prevent, and invisible
+      // to a check that asks `currentAssessments` for it.
+      await store.recordAssessment({
+        version: b.ref,
+        assessorRef: 'user:1',
+        assessorKind: 'human',
+        verdict: 'approve',
+        implicit: true,
+        recordedAt: T1,
+      });
+      const authors = await store.assessmentsByActor('user:1', [a.ref, b.ref]);
+      equal(authors.length, 1, 'the author holds one assessment');
+      equal(authors[0]!.implicit, true, 'implicit survives assessmentsByActor');
     },
   },
   {
@@ -678,6 +765,184 @@ const CHECKS: readonly Check[] = [
       const version = await store.getVersion(ref);
       truthy(version, 'getVersion returned null for a seeded version');
       equal(version!.risk.level, 'high', 'risk level');
+    },
+  },
+  {
+    name: 'timestamps come back in UTC, as the contract pins them',
+    async run(h) {
+      const { store, seed } = h;
+      // Both this package and a store's own oldest-first ordering compare
+      // these strings directly, and lexical order is chronological order only
+      // within one offset. A host that hands back `2020-01-01T01:00:00+01:00`
+      // for the same instant as `00:00:00Z` sorts it after, so its queue
+      // reports oldest-first while serving something else — and nothing throws.
+      // The one representation that cannot do this is the one the contract
+      // names, so that is what is checked, rather than any parseable instant.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T1,
+      });
+      const { ref } = await seed.version({ proposalId, submittedAt: T2 });
+      // Kept, not discarded: these methods return the same stored types, so a
+      // store that persists canonically and formats its own return value some
+      // other way is nonconforming on a value a caller can use directly
+      // without ever reading it back.
+      const appended = await store.recordAssessment({
+        version: ref,
+        assessorRef: 'agent:1',
+        assessorKind: 'agent',
+        verdict: 'approve',
+        recordedAt: T2,
+      });
+      const [proposal] = await store.listOpenProposals(h.space);
+      truthy(proposal, 'listOpenProposals returned nothing');
+      // The third pair: `getProposal` is a separate implementation returning
+      // the same row, so the queue's read being right says nothing about it.
+      const fetched = await store.getProposal(proposalId);
+      truthy(fetched, 'getProposal returned null');
+      const version = await store.getVersion(ref);
+      truthy(version, 'getVersion returned null');
+      // Separately, because they are separately implemented and the review
+      // queue reads only this one: a `submittedAt` normalised on the way out
+      // of `getVersion` and handed back raw here is invisible to a check that
+      // asks the other path, and is exactly the value `settled` compares.
+      const latest = await store.latestVersion(proposalId);
+      truthy(latest, 'latestVersion returned null');
+      const [assessment] = await store.currentAssessments(ref);
+      truthy(assessment, 'currentAssessments returned nothing');
+      // The sibling read, for the same reason as the two version methods
+      // above: separately implemented, over the same row.
+      const [byActor] = await store.assessmentsByActor('agent:1', [ref]);
+      truthy(byActor, 'assessmentsByActor returned nothing');
+      // Every timestamp the port hands back, not the three the queue reads.
+      // The contract is on the type, so a clause that checked only the fields
+      // one caller happens to compare would leave the rest free to be written
+      // any way at all — and a host normalising per call site rather than at
+      // the adapter boundary is exactly how the offsets get in.
+      // At the submission instant, not before it. A version cannot be
+      // disputed before it was submitted, and an adapter that enforces that —
+      // as this suite now asks them to for `submittedAt` against `createdAt` —
+      // would reject the fixture and fail this check for a reason that has
+      // nothing to do with timestamp representation.
+      const dispute = await store.openDispute({
+        version: ref,
+        openedByRef: 'user:2',
+        openedByKind: 'human',
+        openedAt: T2,
+      });
+      const appendedRuling = await store.ruleDispute({
+        disputeId: dispute.disputeId,
+        ruling: 'rejected',
+        ruledByRef: 'user:3',
+        ruledAt: T2,
+      });
+      const appendedDecision = await store.recordDecision({
+        version: ref,
+        policyId: 'p',
+        policyVersion: '1',
+        allowed: false,
+        inputFingerprint: 'f1',
+        mode: 'shadow',
+        evaluatedAt: T2,
+      });
+      const [stored] = await store.disputes(ref);
+      truthy(stored, 'disputes returned nothing');
+      const [ruling] = await store.disputeRulings(dispute.disputeId);
+      truthy(ruling, 'disputeRulings returned nothing');
+      const decision = await store.latestDecision(ref);
+      truthy(decision, 'latestDecision returned null');
+      for (const [what, value] of [
+        ['proposal createdAt (listOpenProposals)', proposal!.createdAt],
+        ['proposal createdAt (getProposal)', fetched!.createdAt],
+        ['version submittedAt (getVersion)', version!.submittedAt],
+        ['version submittedAt (latestVersion)', latest!.submittedAt],
+        ['assessment recordedAt (currentAssessments)', assessment!.recordedAt],
+        ['assessment recordedAt (assessmentsByActor)', byActor!.recordedAt],
+        ['dispute openedAt', stored!.openedAt],
+        ['ruling ruledAt', ruling!.ruledAt],
+        ['decision evaluatedAt', decision!.evaluatedAt],
+        ['assessment recordedAt (recordAssessment)', appended.recordedAt],
+        ['dispute openedAt (openDispute)', dispute.openedAt],
+        ['ruling ruledAt (ruleDispute)', appendedRuling.ruledAt],
+        ['decision evaluatedAt (recordDecision)', appendedDecision.evaluatedAt],
+      ] as const) {
+        truthy(
+          isCanonicalTimestamp(value),
+          `${what} is ${JSON.stringify(value)}, not a Z-suffixed UTC ` +
+            'ISO-8601 instant with milliseconds (2020-01-01T00:00:00.000Z). ' +
+            'Normalise on the way out of the adapter — `toISOString()` ' +
+            'already emits this: these strings are compared directly, and ' +
+            'both an offset and a varying fractional width make lexical ' +
+            'order disagree with chronological order',
+        );
+      }
+    },
+  },
+  {
+    name: 'a submitted version is never older than its own proposal',
+    async run(h) {
+      const { store, seed } = h;
+      // The queue leans on this to stop early. Everything it has not read was
+      // created after the last row it did read, so nothing unread can carry a
+      // version older than that instant — but only if a version is never
+      // submitted before its proposal exists. A store that reports such a row
+      // breaks the proof silently, and the symptom is a queue serving
+      // newest-first while documenting the reverse.
+      //
+      // Asked of the seeder rather than of a well-formed row, because a
+      // well-formed row demonstrates nothing: T1 against T1 holds for anything
+      // that round-trips at all. So the check tries to make the bad row.
+      // Refusing to create it is conformance — a host whose write path rejects
+      // a backdated submission has nothing to prove here, and the seeder
+      // stands in for that path. What is not conformance is the row being
+      // readable afterwards, which is asked of the store rather than inferred
+      // from whether the seeder threw: a write that persists and then fails
+      // leaves the row just as visible as one that succeeded.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T1,
+      });
+      let ref: ProposalVersionRef | null = null;
+      try {
+        ({ ref } = await seed.version({ proposalId, submittedAt: T0 }));
+      } catch {
+        // A throw is not the answer on its own. A write that persists and
+        // then fails leaves the row exactly as visible as one that succeeded,
+        // and a seeder can also throw for a reason of its own that says
+        // nothing about this invariant. So the question is the same either
+        // way: is such a row readable now?
+      }
+      // Both read paths, because they are separately implemented and only one
+      // of them is the queue's: `candidatePage` hydrates through
+      // `latestVersion`, so a row hidden or normalised in `getVersion` and
+      // handed back raw here still reaches `settled`. Asking the path that
+      // states the invariant rather than the path that relies on it is how a
+      // clause certifies a method nothing reads.
+      const found = [
+        ['latestVersion', await store.latestVersion(proposalId)] as const,
+        ...(ref === null
+          ? []
+          : ([['getVersion', await store.getVersion(ref)]] as const)),
+      ];
+      // Nothing was created, so nothing violates anything. The honest result
+      // for a store that refused the write, and the only case a throw settles.
+      if (found.every(([, version]) => version === null)) return;
+      const [proposal] = await store.listOpenProposals(h.space);
+      truthy(proposal, 'listOpenProposals returned nothing');
+      for (const [via, version] of found) {
+        if (version === null) continue;
+        truthy(
+          version.submittedAt === null ||
+            version.submittedAt >= proposal!.createdAt,
+          `${via} reports a version submitted at ` +
+            `${String(version.submittedAt)} on a proposal created at ` +
+            `${proposal!.createdAt}. Reject the write, normalise the stamp, ` +
+            'or the review queue will stop early and serve this row out of ' +
+            'order',
+        );
+      }
     },
   },
   {

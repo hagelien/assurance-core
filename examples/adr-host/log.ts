@@ -103,6 +103,19 @@ export class AdrLog {
       // tests would have, because nothing here reads the field.
       submittedAt: input.submittedAt === undefined ? input.writtenAt : input.submittedAt,
     };
+    // A draft cannot have been submitted before the change request that holds
+    // it was opened. Enforced rather than assumed, because the review queue
+    // stops reading once it can prove it has the oldest work, and that proof
+    // is "nothing unread was created earlier, so nothing unread was submitted
+    // earlier" — one backdated draft turns it into a queue that serves out of
+    // order and says it did not. The port's conformance suite asks for this
+    // row directly; refusing to make it is the answer.
+    if (draft.submittedAt !== null && draft.submittedAt < change.openedAt) {
+      throw new Error(
+        `addDraft: submitted at ${draft.submittedAt.toISOString()}, before ` +
+          `change ${change.id} was opened at ${change.openedAt.toISOString()}`,
+      );
+    }
     change.drafts.push(draft);
     return draft;
   }

@@ -236,6 +236,171 @@ export async function selectReviewQueue(args: {
 }
 
 /**
+ * The most proposals one selection will read looking for `limit` eligible ones.
+ *
+ * A ceiling rather than a promise: a reviewer who has judged more than this
+ * many of a space's oldest rows gets a short batch and a `truncated` flag, not
+ * an unbounded scan. Overridable per call for a host whose backlog needs a
+ * different one.
+ */
+export const MAX_CANDIDATE_WINDOW = 2000;
+
+/** One read of the store, with what the caller needs to decide about reading more. */
+interface CandidatePage {
+  readonly candidates: readonly ReviewCandidate[];
+  /** Open proposals the store returned, before any of them were dropped. */
+  readonly examinedProposals: number;
+  /** The store returned fewer proposals than asked for: there are no more. */
+  readonly exhausted: boolean;
+  /**
+   * The creation time of the oldest proposal this page did **not** serve, or
+   * of the last one it did when the space ran out first. Null for an empty
+   * page.
+   *
+   * The store orders by proposal creation, so every proposal outside this page
+   * was created at or after this instant — and a version is never submitted
+   * before its proposal exists. So every unserved row's version is at least
+   * this old, which is what lets the caller know when it has provably found
+   * the oldest work without reading the whole backlog.
+   */
+  readonly readThrough: Timestamp | null;
+}
+
+/**
+ * How many hydration reads may be outstanding at once.
+ *
+ * A ceiling rather than a target. One at a time turns a grown window into
+ * thousands of sequential round trips; all at once turns a single queue
+ * request into a connection-pool exhaustion. Modest on purpose: the win over
+ * serial is most of the way there by a handful, and a core has no idea what
+ * else is contending for the host's pool.
+ */
+const HYDRATION_CONCURRENCY = 8;
+
+/**
+ * Map with at most `limit` calls in flight, results in input order.
+ *
+ * Order matters here rather than being a nicety: `listOpenProposals` is
+ * oldest-first and the page's candidates inherit that order, so results are
+ * placed by index rather than pushed as they land.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const state: { failure?: { error: unknown } } = {};
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      // The first failure stops the pool taking new work. `Promise.all` alone
+      // rejects the moment one worker does, and the others carry on pulling
+      // indices behind a caller that has already been handed the error — a
+      // failed request near the front of a 2,000-row window would go on
+      // issuing almost the whole window against a store that is, on the
+      // evidence, already in trouble.
+      if (state.failure !== undefined) return;
+      const index = next++;
+      if (index >= items.length) return;
+      try {
+        results[index] = await fn(items[index]!);
+      } catch (error) {
+        state.failure ??= { error };
+        return;
+      }
+    }
+  };
+  // Workers swallow their own rejection, so this settles rather than racing:
+  // by the time it resolves nothing is still in flight, and the caller is not
+  // handed an error while reads it started are still outstanding.
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+  );
+  if (state.failure !== undefined) throw state.failure.error;
+  return results;
+}
+
+async function candidatePage(
+  store: AssuranceStore,
+  space: SpaceId,
+  query: { targetType?: TargetType; limit?: number },
+): Promise<CandidatePage> {
+  const { limit, ...narrowing } = query;
+  // One row past the window, and only to answer "is there more?".
+  //
+  // A short page proves exhaustion; a full one does not, and the difference
+  // matters exactly at the boundary. A space holding precisely `limit` open
+  // proposals returns precisely `limit` rows, so without the sentinel it looks
+  // identical to a space holding a million — and a caller at its cap would
+  // report `truncated` over a backlog it had in fact read to the end, which is
+  // the distinction this page exists to keep honest, inverted.
+  const asked = limit === undefined ? narrowing : { ...narrowing, limit: limit + 1 };
+  const read = await store.listOpenProposals(space, asked);
+  const proposals = limit === undefined ? read : read.slice(0, limit);
+  // Read on this pass, not carried from an earlier one.
+  //
+  // A cache across the re-reads is the obvious saving and was here twice:
+  // first keyed on the proposal id, which answered a later pass with a version
+  // read before a revision, and then keyed additionally on `currentVersionId`
+  // — which this port documents as a projection that may disagree with the
+  // history, with the history winning. A revision token the contract permits
+  // to lag is not a revision token, so that key made the staleness rarer
+  // without making it impossible, which is the worse of the two failures: the
+  // same wrong answer, now hard to reproduce.
+  //
+  // What is left is a bounded multiple of the final window in *calls* —
+  // measured at 1.9x, the re-read prefixes being a geometric series — and
+  // those calls overlap rather than queueing one behind another. Serially, a
+  // grown window is thousands of round trips end to end against a store built
+  // for real latency, which is a queue endpoint that takes seconds; the cap is
+  // on how many are outstanding, because "all of them at once" is how a
+  // connection pool is exhausted by a single request.
+  //
+  // Getting the calls themselves back needs the store to promise a snapshot,
+  // or the port to gain a cursor so the prefix is not re-read at all. Both are
+  // contract changes and neither belongs in a queue fix.
+  const versions = await mapWithConcurrency(
+    proposals,
+    HYDRATION_CONCURRENCY,
+    (proposal) => store.latestVersion(proposal.proposalId),
+  );
+  const candidates: ReviewCandidate[] = [];
+  proposals.forEach((proposal, index) => {
+    const version = versions[index]!;
+    // A proposal with no submitted version is not reviewable: there is nothing
+    // to show. Skipped rather than shown as excluded, because it never became
+    // a candidate in the first place.
+    if (!version || version.submittedAt === null) return;
+    candidates.push({
+      version: version.ref,
+      target: version.target,
+      createdAt: version.submittedAt,
+      authorRef: proposal.author.actorRef,
+      visible: true,
+    });
+  });
+  // The sentinel's own instant, when there is one, and the last row taken
+  // otherwise. The sentinel is the oldest proposal this page did *not* serve,
+  // so every row outside the page — the sentinel included — was created at or
+  // after it, which is a weaker bar for a served item to clear than the last
+  // taken row's. Reading the extra row and then discarding its timestamp cost
+  // a whole doubling: with `limit` equal to the cap, a complete batch could
+  // certify only `limit - 1` of its items and came back `truncated`.
+  const boundary = read.at(limit === undefined ? -1 : limit) ?? proposals.at(-1);
+  return {
+    candidates,
+    examinedProposals: proposals.length,
+    // The sentinel decides this, not the candidate count. Distinguished from
+    // "some rows were dropped" deliberately: a caller that grew its window on a
+    // short *candidate* count alone would loop forever against a space whose
+    // oldest rows have no submitted version.
+    exhausted: limit === undefined || read.length <= limit,
+    readThrough: boundary?.createdAt ?? null,
+  };
+}
+
+/**
  * Candidates drawn from the store alone, for a host with no extra visibility
  * rule of its own.
  *
@@ -244,27 +409,256 @@ export async function selectReviewQueue(args: {
  * A host with per-row access control must build its own candidates: passing a
  * row through here and filtering afterwards would mean it had already been
  * counted as examined and, worse, that a future caller could skip the filter.
+ *
+ * `limit` is a count of *candidates*, not of rows read. A proposal with no
+ * submitted version is not one, so asking for fifty and reading fifty rows
+ * returns fewer than fifty whenever any of them is unsubmitted — a short page
+ * that looks exactly like an exhausted backlog. The read window grows until
+ * the count is met or the space runs out.
+ *
+ * This does not, and cannot, account for the reviewer's own eligibility: it
+ * does not know who is asking. A queue served from these candidates has the
+ * same shortfall one rule further on — see {@link selectReviewQueueFromStore},
+ * which is the function to call when the reviewer is known.
  */
 export async function candidatesFromStore(
   store: AssuranceStore,
   space: SpaceId,
-  query: { targetType?: TargetType; limit?: number } = {},
+  query: { targetType?: TargetType; limit?: number; maxCandidateWindow?: number } = {},
 ): Promise<readonly ReviewCandidate[]> {
-  const proposals = await store.listOpenProposals(space, query);
-  const candidates: ReviewCandidate[] = [];
-  for (const proposal of proposals) {
-    const version = await store.latestVersion(proposal.proposalId);
-    // A proposal with no submitted version is not reviewable: there is nothing
-    // to show. Skipped rather than shown as excluded, because it never became
-    // a candidate in the first place.
-    if (!version || version.submittedAt === null) continue;
-    candidates.push({
-      version: version.ref,
-      target: version.target,
-      createdAt: version.submittedAt,
-      authorRef: proposal.author.actorRef,
-      visible: true,
-    });
+  const { limit, maxCandidateWindow, ...narrowing } = query;
+  if (limit === undefined) {
+    return (await candidatePage(store, space, narrowing)).candidates;
   }
-  return candidates;
+  // The cap is reached silently here: this returns no `truncated`, so a
+  // clamped call is a short list with nothing to distinguish it from an
+  // exhausted space. That is why {@link selectReviewQueueFromStore} exists for
+  // the case where the answer has to say which of the two it is.
+  const { value } = await overGrowingWindow(
+    { store, space, narrowing, limit, maxCandidateWindow },
+    (page) => ({
+      settled: page.candidates.length >= limit,
+      value: page.candidates.slice(0, limit),
+    }),
+  );
+  return value;
+}
+
+/**
+ * Read a growing prefix of a space until a caller-supplied rule settles.
+ *
+ * Both callers below need the same four things — a window clamped to the cap,
+ * doubling, one hydration per proposal across the re-reads, and the cap
+ * reported rather than hidden — and differ only in when they have enough.
+ * Written out twice, they drifted twice: the hydration cache was added to one
+ * and not the other, and so was the clamp, each shipping as its own defect in
+ * a loop that already read correctly a few lines away. The stopping rule is
+ * the part that genuinely differs, so it is the part that is passed in.
+ *
+ * `truncated` means the window reached the cap without settling, on a space
+ * that had not run out — the batch is short because the search stopped, not
+ * because there is no more work. A caller with nowhere to report that ignores
+ * it, and says so where it does.
+ */
+async function overGrowingWindow<T>(
+  args: {
+    store: AssuranceStore;
+    space: SpaceId;
+    narrowing: { targetType?: TargetType };
+    limit: number;
+    maxCandidateWindow?: number | undefined;
+  },
+  attempt: (
+    page: CandidatePage,
+  ) => { settled: boolean; value: T } | Promise<{ settled: boolean; value: T }>,
+): Promise<{ value: T; truncated: boolean }> {
+  const cap = args.maxCandidateWindow ?? MAX_CANDIDATE_WINDOW;
+  // Rejected rather than defaulted, and checked before any read. A ceiling
+  // that is not a number makes every comparison below false — `NaN >= NaN` is
+  // false, and so is the exhaustion test — so the loop grows a window of `NaN`
+  // for ever, querying a store that answers nothing. A malformed numeric
+  // config is a caller's bug either way; the difference is between an
+  // exception naming the field and a request that never returns, and only one
+  // of those can be found from a stack trace.
+  // Integers, because both are counts of rows. A fractional window is
+  // forwarded to `listOpenProposals` as a fractional `LIMIT`, which every
+  // store answers differently and a SQL one rejects outright; a fractional
+  // limit reaches `slice(0, 0.5)` and returns nothing while the loop believes
+  // it settled. Neither is a number of rows anyone meant.
+  if (!Number.isInteger(cap) || cap < 1) {
+    throw new RangeError(
+      `maxCandidateWindow must be an integer of at least 1, got ${String(
+        args.maxCandidateWindow,
+      )}`,
+    );
+  }
+  if (!Number.isInteger(args.limit) || args.limit < 0) {
+    throw new RangeError(
+      `limit must be an integer of at least 0, got ${String(args.limit)}`,
+    );
+  }
+  // `limit` rows to serve `limit`, but never past the cap. A caller asking for
+  // more than the ceiling allows is asking for something the ceiling forbids,
+  // and reading 10,000 rows because the limit said so would make the cap
+  // decorative — it exists to bound the work one request can do.
+  let window = Math.min(Math.max(args.limit, 1), cap);
+  for (;;) {
+    const page = await candidatePage(
+      args.store,
+      args.space,
+      { ...args.narrowing, limit: window },
+    );
+    const { settled, value } = await attempt(page);
+    if (settled || page.exhausted) return { value, truncated: false };
+    if (window >= cap) return { value, truncated: true };
+    window = Math.min(window * 2, cap);
+  }
+}
+
+/** What {@link selectReviewQueueFromStore} returns beyond the plain selection. */
+export interface StoreReviewQueueResult extends ReviewQueueResult {
+  /**
+   * The window hit its cap before `limit` eligible rows were found, and the
+   * space had not run out.
+   *
+   * A short batch with this false means there is no more work for this
+   * reviewer. With it true the batch is short because the search stopped, and
+   * the two must not be read the same way: one is an empty backlog, the other
+   * is a backlog the queue gave up looking through.
+   */
+  readonly truncated: boolean;
+}
+
+/**
+ * The whole selection, over a store, for a host with no visibility rule.
+ *
+ * Why this exists rather than "call `candidatesFromStore`, then
+ * `selectReviewQueue`": those two apply the eligibility rules *after* the
+ * store's `limit`, and the rules are what make the batch short. A reviewer who
+ * has already judged the oldest `limit` rows of a space gets served nothing,
+ * while an equivalent SQL queue — which puts author-exclusion and
+ * already-judged inside its own query, ahead of its LIMIT — serves a full
+ * batch from further back. That is not a formatting difference: it is one
+ * queue showing a reviewer an empty backlog that another shows as full, and it
+ * was found in production rather than in a test, because on a small database
+ * the two agree.
+ *
+ * So the window grows — doubling, re-read from the start — until `limit`
+ * eligible rows are in hand, the space runs out, or the cap is reached.
+ * Re-reading the prefix costs at most one extra full read, which is what a
+ * cursor would buy back; a cursor is also a second thing every store
+ * implementation would have to get right, and `listOpenProposals` is
+ * contractually oldest-first, so a growing prefix is stable: the row at
+ * position n of the small window is at position n of the large one.
+ *
+ * `examined` and `excluded` describe the final window, not the sum of the
+ * re-reads — a prefix read three times was not three candidates.
+ */
+export async function selectReviewQueueFromStore(args: {
+  store: AssuranceStore;
+  space: SpaceId;
+  reviewerRef: string;
+  limit: number;
+  targetType?: TargetType;
+  selfReviewEnabled?: boolean;
+  reserves?: readonly TypeReserve[];
+  maxCandidateWindow?: number;
+}): Promise<StoreReviewQueueResult> {
+  const narrowing = args.targetType === undefined ? {} : { targetType: args.targetType };
+  const { value, truncated } = await overGrowingWindow(
+    {
+      store: args.store,
+      space: args.space,
+      narrowing,
+      limit: args.limit,
+      maxCandidateWindow: args.maxCandidateWindow,
+    },
+    async (page) => {
+      const selection = await selectReviewQueue({
+        store: args.store,
+        reviewerRef: args.reviewerRef,
+        candidates: page.candidates,
+        limit: args.limit,
+        ...(args.selfReviewEnabled === undefined
+          ? {}
+          : { selfReviewEnabled: args.selfReviewEnabled }),
+        ...(args.reserves === undefined ? {} : { reserves: args.reserves }),
+      });
+      return { settled: settled(selection, page, args), value: selection };
+    },
+  );
+  return { ...value, truncated };
+}
+
+/**
+ * Whether this window has provably found the batch, or only filled it.
+ *
+ * Two things a full batch does not by itself establish, both of which cost
+ * nothing to check and were wrong without the check.
+ *
+ * **The batch is the oldest work.** The store orders by proposal creation and
+ * the batch orders by the current version's submission — different keys, and a
+ * proposal revised after a newer one was submitted carries a version younger
+ * than its position suggests. So a full window can hold `limit` recently
+ * revised rows while an older *version* sits on a proposal just outside it.
+ * What the store's ordering does guarantee is that every unread proposal was
+ * created after `readThrough`, and no version predates its own proposal — so
+ * an item submitted at or before `readThrough` cannot be beaten by anything
+ * unread. Once `limit` of those are in hand the batch is settled; until then a
+ * fuller window can still change it.
+ *
+ * **A reserve is met.** `selectReviewBatch` allocates the reserve out of the
+ * candidates it is given, so a window whose first `limit` eligible rows are all
+ * one type fills the batch and silently serves the reserved type nothing —
+ * which is precisely the starvation reserves exist to prevent, arriving through
+ * the stopping rule instead of the selection.
+ */
+function settled(
+  selection: ReviewQueueResult,
+  page: CandidatePage,
+  args: { limit: number; reserves?: readonly TypeReserve[]; targetType?: TargetType },
+): boolean {
+  const through = page.readThrough;
+  // Strictly older, not "at or older". At equality the guarantee runs out: an
+  // unread proposal may share the boundary's `createdAt` and carry a version
+  // submitted at that same instant, and the store contract promises oldest-first
+  // without promising a tie-break that matches the batch's. So a tie is exactly
+  // the case where an unread row could still sort ahead of a served one.
+  //
+  // The cost is a space whose rows all share one timestamp and outnumbers the
+  // cap: it grows to the cap and says `truncated`, which is the honest answer,
+  // because there it genuinely cannot prove the batch. Anything smaller runs
+  // out first and settles on `exhausted`.
+  const provable = selection.items.filter(
+    (item) => through !== null && item.createdAt < through,
+  );
+  if (provable.length < args.limit) return false;
+  // The same remaining-capacity rule `selectReviewBatch` allocates by, not the
+  // raw fractions. Reserves may total more than one — 80% of A and 80% of B is
+  // a legitimate way to say "mostly A, then B" — and the allocator gives the
+  // first its eight slots and caps the second at the two left. Demanding both
+  // full fractions here would scan to the cap and report `truncated` over a
+  // batch the allocator considers finished.
+  let remaining = args.limit;
+  // What earlier entries already claimed of each type. The allocator excludes
+  // items it has taken, so two 50% reserves on one type ask for ten between
+  // them, not five twice — and comparing each entry against the type's whole
+  // count settled on the first entry's worth.
+  const claimed = new Map<TargetType, number>();
+  for (const { targetType, fraction } of args.reserves ?? []) {
+    if (remaining <= 0) break;
+    // A reserve for a type the query cannot return is not unmet, it is
+    // inapplicable: narrowing to notes and reserving records, the store will
+    // never produce one however far the window grows, so waiting for it means
+    // scanning to the cap and calling a complete batch truncated.
+    if (args.targetType !== undefined && targetType !== args.targetType) continue;
+    const want = Math.min(Math.ceil(args.limit * fraction), remaining);
+    const already = claimed.get(targetType) ?? 0;
+    const have =
+      provable.filter((i) => i.target.type === targetType).length - already;
+    if (have < want) return false;
+    claimed.set(targetType, already + want);
+    remaining -= want;
+  }
+  return true;
 }

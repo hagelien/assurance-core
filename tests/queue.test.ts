@@ -15,6 +15,7 @@ import {
   judgedVersions,
   selectReviewBatch,
   selectReviewQueue,
+  selectReviewQueueFromStore,
   type ActorSnapshot,
   type ReviewCandidate,
 } from '../src/index.js';
@@ -341,5 +342,734 @@ describe('candidatesFromStore', () => {
     });
     s.seedVersion({ proposalId: 'p1', versionId: 'v1' });
     expect(await candidatesFromStore(s, 's')).toEqual([]);
+  });
+});
+
+describe('selectReviewQueueFromStore — the window has to outlast the rules', () => {
+  /**
+   * `n` open proposals in one space, strictly oldest-first, all by someone else.
+   *
+   * Distinct ages on purpose: the store orders on `(createdAt, proposalId)` and
+   * the batch on the version's own age, so a fixture with repeated timestamps
+   * would make an ordering assertion here a statement about tie-breaks rather
+   * than about the window.
+   */
+  const age = (i: number): string =>
+    `2020-01-01T${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00.000Z`;
+
+  function backlog(n: number): MemoryAssuranceStore {
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < n; i += 1) {
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+    return store;
+  }
+
+  async function judgeFirst(
+    store: MemoryAssuranceStore,
+    reviewerRef: string,
+    n: number,
+  ): Promise<void> {
+    const oldest = await store.listOpenProposals('s', { limit: n });
+    for (const proposal of oldest) {
+      await store.recordAssessment({
+        version: { proposalId: proposal.proposalId, versionId: `v-${proposal.target.id}` },
+        assessorRef: reviewerRef,
+        assessorKind: 'agent',
+        verdict: 'approve',
+        recordedAt: T(2),
+      });
+    }
+  }
+
+  it('serves a full batch from behind a window the reviewer has judged', async () => {
+    // The production reproduction, in miniature: the reviewer has judged every
+    // one of the oldest `limit` rows, so a selection that read `limit` and then
+    // applied the rules serves nothing at all — while an SQL queue filtering
+    // ahead of its own LIMIT serves a full batch from further back.
+    const store = backlog(60);
+    await judgeFirst(store, 'agent:7', 10);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    expect(result.items).toHaveLength(10);
+    expect(result.truncated).toBe(false);
+    // And it is the work immediately behind the judged prefix, in age order —
+    // growing the window must not reorder the backlog.
+    expect(result.items.map((i) => i.target.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `n${String(i + 10).padStart(4, '0')}`),
+    );
+  });
+
+  it('stops at the cap and says the batch is short because it stopped', async () => {
+    // The other half: a short batch must not be read as an empty backlog when
+    // the search was the thing that ended. There is eligible work here — it is
+    // past the cap.
+    const store = backlog(60);
+    await judgeFirst(store, 'agent:7', 40);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      maxCandidateWindow: 20,
+    });
+
+    expect(result.items).toHaveLength(0);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('does not claim truncation at a cap the backlog exactly fills', async () => {
+    // The boundary the sentinel exists for. The space holds precisely
+    // `maxCandidateWindow` proposals, so the capped read returns precisely that
+    // many and looks identical to a space holding a million more — and with
+    // some of them ineligible the search ends at the cap. Without the extra
+    // row it reported a hidden backlog over a space it had read to the end,
+    // which is this flag's own distinction inverted.
+    const store = backlog(20);
+    await judgeFirst(store, 'agent:7', 15);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      maxCandidateWindow: 20,
+    });
+
+    expect(result.items).toHaveLength(5);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('does not claim truncation when the space simply runs out', async () => {
+    const store = backlog(12);
+    await judgeFirst(store, 'agent:7', 8);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    expect(result.items).toHaveLength(4);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('keeps growing until a reserved type has been looked for', async () => {
+    // The starvation `reserves` exists to prevent, arriving through the
+    // stopping rule instead of the selection: the first ten eligible rows are
+    // all notes, so the batch fills, and the reserved type is never read at
+    // all. `selectReviewBatch` can only allocate out of what it is given.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 30; i += 1) {
+      const type = i < 10 ? 'note' : 'record';
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type, id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      reserves: [{ targetType: 'record', fraction: 0.2 }],
+    });
+
+    expect(result.items).toHaveLength(10);
+    expect(result.items.filter((i) => i.target.type === 'record')).toHaveLength(2);
+  });
+
+  it('asks for both halves when one type is reserved twice', async () => {
+    // The allocator excludes what it has already taken, so two 50% note
+    // reserves ask for ten notes between them. Comparing each entry against the
+    // type's whole count settled on the first entry's worth — five — and served
+    // a batch the allocator would have filled differently.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 40; i += 1) {
+      // Notes are scarce near the front and plentiful past it, so a run that
+      // settles on one entry's worth visibly serves fewer of them.
+      const type = i < 5 || i >= 30 ? 'note' : 'record';
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type, id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      reserves: [
+        { targetType: 'note', fraction: 0.5 },
+        { targetType: 'note', fraction: 0.5 },
+      ],
+    });
+
+    expect(result.items.filter((i) => i.target.type === 'note')).toHaveLength(10);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('does not settle on a tie at the window boundary', async () => {
+    // The boundary guarantee is "every unread proposal was created after the
+    // last one read", which at equal timestamps says nothing: an unread row can
+    // share the boundary instant and carry a version submitted at it, and the
+    // store's tie-break need not match the batch's. Here the eleventh row ties
+    // with the tenth and is the one the batch would serve first.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 12; i += 1) {
+      const id = `n${String(i).padStart(4, '0')}`;
+      // Rows 9 and 10 share a creation instant, straddling a window of 10.
+      const at = i >= 9 && i <= 10 ? age(9) : age(i);
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: at,
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: at });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    // It read past the tie rather than settling on it, so the whole space is
+    // accounted for and the batch is the ten oldest of twelve.
+    expect(result.items).toHaveLength(10);
+    expect(result.examined).toBe(12);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('settles when reserves overlap, as the allocator does', async () => {
+    // Fractions may total more than one — 80% A then 80% B is a legitimate way
+    // to say "mostly A, then B" — and `selectReviewBatch` gives the first its
+    // eight slots and caps the second at the two left. Demanding both full
+    // fractions here scanned to the cap and called a finished batch truncated.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 40; i += 1) {
+      const type = i % 2 === 0 ? 'note' : 'record';
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type, id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      maxCandidateWindow: 20,
+      reserves: [
+        { targetType: 'note', fraction: 0.8 },
+        { targetType: 'record', fraction: 0.8 },
+      ],
+    });
+
+    expect(result.items).toHaveLength(10);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('reads no further than the cap when the limit asks for more', async () => {
+    // The cap is a bound on the work one request may do, and a caller asking
+    // for more rows than it allows is asking for something it forbids. Seeding
+    // the window from `limit` alone made the ceiling decorative: a `limit` of
+    // 40 read 40 rows on the first pass and never consulted the cap at all,
+    // which is the resource bound off by however large the caller's number is.
+    const store = backlog(60);
+    let widest = 0;
+    const list = store.listOpenProposals.bind(store);
+    store.listOpenProposals = async (space, query = {}) => {
+      widest = Math.max(widest, query.limit ?? Number.POSITIVE_INFINITY);
+      return list(space, query);
+    };
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 40,
+      maxCandidateWindow: 20,
+    });
+
+    // The cap plus the one sentinel row that tells an exhausted space from a
+    // capped read — never the caller's 40.
+    expect(widest).toBe(21);
+    // The batch the cap permits, and `truncated` says the search stopped —
+    // which is the honest report, not a silently short answer.
+    expect(result.items).toHaveLength(20);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('ignores a reserve for a type the narrowing has already excluded', async () => {
+    // Narrowed to notes and reserving records, the store will never produce a
+    // record however far the window grows. Treating that as an unmet reserve
+    // means scanning to the cap and reporting `truncated` over a batch that is
+    // complete — the flag's own distinction inverted, on a query the caller
+    // wrote deliberately.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 40; i += 1) {
+      const type = i % 4 === 3 ? 'record' : 'note';
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type, id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+    }
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      targetType: 'note',
+      maxCandidateWindow: 20,
+      reserves: [{ targetType: 'record', fraction: 0.2 }],
+    });
+
+    expect(result.items).toHaveLength(10);
+    expect(result.items.every((i) => i.target.type === 'note')).toBe(true);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('proves a full batch that exactly fills the window', async () => {
+    // The sentinel is read to answer "is there more?" and its instant was
+    // thrown away. That cost a whole doubling — and with `limit` equal to the
+    // cap there is no doubling left to spend, so a complete batch of the ten
+    // oldest rows could certify only nine of them and came back `truncated`,
+    // reporting a hidden backlog over work it had provably found.
+    const store = backlog(60);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+      maxCandidateWindow: 10,
+    });
+
+    expect(result.items.map((i) => i.target.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `n${String(i).padStart(4, '0')}`),
+    );
+    expect(result.truncated).toBe(false);
+  });
+
+  it('rejects a ceiling that is not a number instead of looping on it', async () => {
+    // `NaN` makes every comparison in the loop false — `NaN >= NaN` included,
+    // and so is the exhaustion test — so the window grows to `NaN` for ever
+    // against a store that answers nothing. Measured before the guard: more
+    // than 40 reads against a space holding five rows, with no way out.
+    //
+    // A malformed numeric config is the caller's bug either way. The
+    // difference is between an exception naming the field and a request that
+    // never returns, and only one of those can be found from a stack trace.
+    const store = backlog(5);
+
+    await expect(
+      selectReviewQueueFromStore({
+        store,
+        space: 's',
+        reviewerRef: 'agent:7',
+        limit: 10,
+        maxCandidateWindow: Number.NaN,
+      }),
+    ).rejects.toThrow(RangeError);
+
+    await expect(
+      selectReviewQueueFromStore({
+        store,
+        space: 's',
+        reviewerRef: 'agent:7',
+        limit: Number.NaN,
+      }),
+    ).rejects.toThrow(RangeError);
+
+    // Both public entry points grow, so both were exposed.
+    await expect(
+      candidatesFromStore(store, 's', { limit: 10, maxCandidateWindow: Number.NaN }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it('rejects a fractional window or batch size', async () => {
+    // Both are counts of rows. A fractional window is forwarded as a
+    // fractional `LIMIT`, which every store answers differently and a SQL one
+    // rejects outright; a fractional limit reaches `slice(0, 0.5)` and returns
+    // nothing while the loop believes it settled — a queue that serves an
+    // empty batch and calls it complete.
+    const store = backlog(5);
+
+    await expect(
+      selectReviewQueueFromStore({
+        store,
+        space: 's',
+        reviewerRef: 'agent:7',
+        limit: 10,
+        maxCandidateWindow: 10.5,
+      }),
+    ).rejects.toThrow(RangeError);
+
+    await expect(
+      selectReviewQueueFromStore({
+        store,
+        space: 's',
+        reviewerRef: 'agent:7',
+        limit: 0.5,
+      }),
+    ).rejects.toThrow(RangeError);
+
+    await expect(
+      candidatesFromStore(store, 's', { limit: 2.5 }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it('sees a proposal submitted while the window was growing', async () => {
+    // The window is re-read and the store is live underneath it. A proposal
+    // that gains its first submitted version between two passes comes back
+    // from the second read with a `currentVersionId` where the first had none
+    // — and a cache keyed on the proposal id alone answered with the `null` it
+    // learned on the first pass, so the row was missing from the batch this
+    // request served rather than merely late.
+    const store = backlog(30);
+    await judgeFirst(store, 'agent:7', 12);
+    // An unsubmitted proposal, oldest in the space, that gets submitted after
+    // the first read has already hydrated it as having no version. Seeded
+    // after the judging so it is not one of the rows judged.
+    store.seedProposal({
+      proposalId: 'p-late',
+      target: { space: 's', type: 'note', id: 'late' },
+      author: actor('user:1'),
+      createdAt: age(0),
+    });
+
+    let reads = 0;
+    const list = store.listOpenProposals.bind(store);
+    store.listOpenProposals = async (space, query = {}) => {
+      reads += 1;
+      const rows = await list(space, query);
+      // Submitted between the first pass's hydration and the second's: this
+      // spy runs before the hydration of the read it intercepts, so seeding on
+      // the first call would let that same pass see the version and prove
+      // nothing.
+      if (reads === 2) {
+        store.seedVersion({
+          proposalId: 'p-late',
+          versionId: 'v-late',
+          submittedAt: age(0),
+        });
+      }
+      return rows;
+    };
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    expect(reads).toBeGreaterThan(1);
+    expect(result.items.map((i) => i.target.id)).toContain('late');
+  });
+
+  it('does not serve a revised proposal over an older version it has not read', async () => {
+    // The store orders by proposal creation; the batch orders by the current
+    // version's submission. A proposal revised after a newer one was submitted
+    // carries a version younger than its position suggests, so a full window of
+    // recently revised rows can hide an older *version* on a proposal just
+    // outside it — and the queue would serve newest-first while claiming the
+    // opposite.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 10; i += 1) {
+      const id = `old${i}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      // Created early, revised late: the version is what the queue orders on.
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(100 + i) });
+    }
+    store.seedProposal({
+      proposalId: 'p-untouched',
+      target: { space: 's', type: 'note', id: 'untouched' },
+      author: actor('user:1'),
+      createdAt: age(10),
+    });
+    store.seedVersion({
+      proposalId: 'p-untouched',
+      versionId: 'v-untouched',
+      submittedAt: age(10),
+    });
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    // The oldest version in the space, and it sat one row past the first window.
+    expect(result.items.map((i) => i.target.id)).toContain('untouched');
+    expect(result.items[0]!.target.id).toBe('untouched');
+  });
+
+  it('counts the final window, not the sum of the re-reads', async () => {
+    // `examined` is a diagnostic a host compares against another queue's. A
+    // prefix read three times was not three candidates, and reporting it as
+    // such would make every parity comparison disagree by the re-read.
+    const store = backlog(60);
+    await judgeFirst(store, 'agent:7', 10);
+
+    const result = await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+
+    // The final window, not 10 + 20 summed over the re-reads. It is 20 because
+    // the boundary is the sentinel's instant — the oldest row the page did not
+    // serve — so the window that first filled the batch can also prove it, and
+    // there is no third doubling to sum.
+    expect(result.examined).toBe(20);
+    expect(result.excluded).toHaveLength(10);
+  });
+});
+
+describe('growing re-reads cost a bounded multiple, and carry nothing forward', () => {
+  // A cache across the re-reads was here twice and is gone: keyed on the
+  // proposal id it answered a later pass with a version read before a
+  // revision, and keyed additionally on `currentVersionId` it relied on a
+  // projection this port documents as permitted to disagree with the history.
+  // A revision token the contract lets lag is not one.
+  //
+  // What is asserted instead is the two things that replaced it. The cost is
+  // a geometric series, so it stays a small multiple of the final window
+  // rather than growing quadratically — that is the regression worth a test,
+  // because it is the one that would make the loop unusable rather than
+  // merely slower. Freshness is covered by the concurrent-submission case
+  // above, which is the property the cache cost us.
+  const age = (i: number): string =>
+    `2020-01-01T${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00.000Z`;
+
+  /** 400 proposals, only every fifth submitted, so the window has to grow far. */
+  function sparse(): { store: MemoryAssuranceStore; asked: string[] } {
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 400; i += 1) {
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: age(i),
+      });
+      if (i % 5 === 0) {
+        store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: age(i) });
+      }
+    }
+    const asked: string[] = [];
+    const latest = store.latestVersion.bind(store);
+    store.latestVersion = async (proposalId) => {
+      asked.push(proposalId);
+      return latest(proposalId);
+    };
+    return { store, asked };
+  }
+
+  it('overlaps the reads without letting them all go at once', async () => {
+    // Serially, a grown window is thousands of round trips end to end against
+    // a store built for real latency — a queue endpoint that takes seconds.
+    // Unbounded is the other failure: one request opening as many connections
+    // as the window is wide. So the assertion is two-sided, and the order the
+    // page depends on has to survive the overlap.
+    const { store } = sparse();
+    let inFlight = 0;
+    let peak = 0;
+    const latest = store.latestVersion.bind(store);
+    store.latestVersion = async (proposalId) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      // A real tick, so overlapping calls are actually concurrent rather than
+      // resolving before the next one starts.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const found = await latest(proposalId);
+      inFlight -= 1;
+      return found;
+    };
+
+    const candidates = await candidatesFromStore(store, 's', { limit: 20 });
+
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+    // Oldest-first, unchanged by the overlap: results are placed by index, not
+    // pushed as they land.
+    expect(candidates.map((c) => c.target.id)).toEqual(
+      Array.from({ length: 20 }, (_, i) => `n${String(i * 5).padStart(4, '0')}`),
+    );
+  });
+
+  it('stops the pool when a read fails instead of draining the window', async () => {
+    // `Promise.all` rejects the moment one worker does, and the others carry
+    // on pulling indices behind a caller already holding the error. A failure
+    // near the front of a wide window would go on issuing nearly the whole
+    // window against a store that is, on the evidence, already in trouble.
+    const { store } = sparse();
+    let calls = 0;
+    const latest = store.latestVersion.bind(store);
+    store.latestVersion = async (proposalId) => {
+      calls += 1;
+      const mine = calls;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (mine === 3) throw new Error('store unavailable');
+      return latest(proposalId);
+    };
+
+    await expect(
+      candidatesFromStore(store, 's', { limit: 20 }),
+    ).rejects.toThrow('store unavailable');
+
+    // Measured after a drain, not at the rejection: orphaned workers keep
+    // pulling indices *after* the caller has its error, so counting
+    // immediately would show a small number whether or not the pool stopped.
+    const atRejection = calls;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The eight already in flight when it failed, plus the few that had
+    // already come back and taken another index — not the 400-row window.
+    expect(calls).toBeLessThan(20);
+    // And nothing kept running once the caller had been answered.
+    expect(calls).toBe(atRejection);
+  });
+
+  it('when growing to fill a candidate count', async () => {
+    const { store, asked } = sparse();
+    await candidatesFromStore(store, 's', { limit: 50 });
+    // 750 reads over a final window of 400: the prefixes summed, not squared.
+    expect(asked).toHaveLength(750);
+    expect(asked.length).toBeLessThan(2 * new Set(asked).size);
+  });
+
+  it('when growing to settle a batch', async () => {
+    const { store, asked } = sparse();
+    await selectReviewQueueFromStore({
+      store,
+      space: 's',
+      reviewerRef: 'agent:7',
+      limit: 10,
+    });
+    expect(asked).toHaveLength(150);
+    expect(asked.length).toBeLessThan(2 * new Set(asked).size);
+  });
+});
+
+describe('candidatesFromStore — limit counts candidates, not rows read', () => {
+  it('fills the count past proposals with no submitted version', async () => {
+    // Unsubmitted proposals are dropped after the store's limit, so asking for
+    // three and reading three returned one. A host cannot tell that short page
+    // from an exhausted backlog.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 10; i += 1) {
+      const id = `n${i}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: T(i + 1),
+      });
+      // Every third one is submitted; the rest are drafts with no version to
+      // show. Submitted at its own proposal's instant, never before it: the
+      // store refuses a backdated submission, and the queue's early stop is
+      // the reason.
+      store.seedVersion({
+        proposalId: `p-${id}`,
+        versionId: `v-${id}`,
+        ...(i % 3 === 0 ? { submittedAt: T(i + 1) } : { submittedAt: null }),
+      });
+    }
+
+    const candidates = await candidatesFromStore(store, 's', { limit: 3 });
+    expect(candidates.map((c) => c.target.id)).toEqual(['n0', 'n3', 'n6']);
+  });
+
+  it('reads no further than the cap when the count asks for more', async () => {
+    // The other growing loop, with the same defect the selector had: seeding
+    // the window from `limit` meant a caller could step over the ceiling just
+    // by asking for more than it allows, and the first read went straight past
+    // it before the cap was ever consulted.
+    const store = new MemoryAssuranceStore();
+    for (let i = 0; i < 60; i += 1) {
+      const id = `n${String(i).padStart(4, '0')}`;
+      store.seedProposal({
+        proposalId: `p-${id}`,
+        target: { space: 's', type: 'note', id },
+        author: actor('user:1'),
+        createdAt: T(1),
+      });
+      store.seedVersion({ proposalId: `p-${id}`, versionId: `v-${id}`, submittedAt: T(1) });
+    }
+    let widest = 0;
+    const list = store.listOpenProposals.bind(store);
+    store.listOpenProposals = async (space, query = {}) => {
+      widest = Math.max(widest, query.limit ?? Number.POSITIVE_INFINITY);
+      return list(space, query);
+    };
+
+    const candidates = await candidatesFromStore(store, 's', {
+      limit: 40,
+      maxCandidateWindow: 20,
+    });
+
+    // The cap plus the one sentinel row, never the caller's 40.
+    expect(widest).toBe(21);
+    expect(candidates).toHaveLength(20);
+  });
+
+  it('returns what there is when the space runs out first', async () => {
+    const store = new MemoryAssuranceStore();
+    store.seedProposal({
+      proposalId: 'p-n0',
+      target: { space: 's', type: 'note', id: 'n0' },
+      author: actor('user:1'),
+      createdAt: T(1),
+    });
+    store.seedVersion({ proposalId: 'p-n0', versionId: 'v-n0', submittedAt: T(1) });
+
+    expect(await candidatesFromStore(store, 's', { limit: 5 })).toHaveLength(1);
   });
 });
