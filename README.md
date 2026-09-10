@@ -222,8 +222,8 @@ cannot open is worse than no comment.
 Publishing is automated by `.github/workflows/publish.yml` and supports several
 ways to cut the same version:
 
-- push a `v*` tag such as `v0.3.0`;
-- push a `release/v*` branch such as `release/v0.3.0`;
+- push a `v*` tag such as `v0.4.0`;
+- push a `release/v*` branch such as `release/v0.4.0`;
 - publish a GitHub release;
 - use `workflow_dispatch` to retry a failed publish.
 
@@ -241,7 +241,7 @@ is operational rather than merely configured.
 
 ## Status
 
-`0.3.0`, and honest about it. `0.2.0` added the store port, conformance suite,
+`0.4.0`, and honest about it. `0.2.0` added the store port, conformance suite,
 review queue and review packet. `0.3.0` widened one thing the first real adapter
 could not express: a dispute ruling may be `superseded`, meaning a replacement
 dispute now governs, and it is the one ruling that does **not** close. Folding
@@ -250,6 +250,33 @@ meaning of the record.
 
 That is the intended way for this interface to grow: a word earns a place when
 a real store loses meaning without it, not when one might.
+
+`0.4.0` adds no vocabulary. It is the release where the queue's paging was made
+to hold under a real backlog, and where two clauses the contract had been
+assuming were written down and checked.
+
+The queue reads a window of candidates and then applies eligibility. Both
+halves of that were wrong in ways only a backlog reveals: a full page was taken
+for a full backlog, so the queue stopped while work remained behind it; the
+window did not grow until the exclusions had been paid for; and a tie at the
+window boundary could settle a reserve that a later row would have changed. The
+window now grows to a ceiling (`MAX_CANDIDATE_WINDOW`), reads one row past
+itself to tell a full page from a finished one, and reports a bad ceiling rather
+than spinning on it. A cache was removed outright rather than repaired: its key
+was a projection the contract allows to change underneath it, which makes a
+correct-looking hit wrong.
+
+Two contract clauses are now explicit, and this is the part to read before
+upgrading an existing adapter. **Every timestamp the port returns must be an
+ISO-8601 instant in UTC with milliseconds** — `2020-01-01T00:00:00.000Z`. The
+offset and the fractional width are both part of it, because
+`2020-01-01T01:00:00+01:00` is the same instant as `00:00:00Z` and sorts after
+it, so a queue promising oldest-first quietly stops delivering it. **Row counts
+must be integers**, and the value a write hands back is covered by the contract
+rather than left to the adapter. The conformance suite checks all of this now,
+so an adapter that passed against `0.3.0` may report failures against `0.4.0`.
+Those failures are the point: the behaviour they name was always required, and
+was previously enforced only by whichever host happened to get it right.
 
 Two hosts use it: the reference work it was extracted from, and the ADR log in
 `examples/`. The second is deliberately small, so "it fits two domains" is a

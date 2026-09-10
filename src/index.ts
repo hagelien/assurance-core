@@ -15,12 +15,15 @@
  * architecture-decision log without any of them acquiring the others'
  * assumptions.
  *
- * A host supplies three things this package deliberately lacks: persistence,
- * an actor's capabilities, and a projection of an `AssuranceProfile` into
- * whatever its interface shows readers. The projection in particular stays
- * with the host — a numeric review level, a badge, a traffic light and a plain
- * sentence are all faithful renderings of the same profile, and the core takes
- * no position on which.
+ * A host supplies what this package deliberately lacks, and the README sets
+ * out why each is excluded rather than merely missing: persistence,
+ * publication, the actor resolution that produces an `ActorContext`, and a
+ * projection of an `AssuranceProfile` into whatever its interface shows
+ * readers. The last two are grouped there as one concern because they share a
+ * reason — both are decisions only the host can make about its own users. The
+ * projection in particular stays with the host: a numeric review level, a
+ * badge, a traffic light and a plain sentence are all faithful renderings of
+ * the same profile, and the core takes no position on which.
  *
  * Persistence is *described* here even though it is not provided:
  * `AssuranceStore` is the interface a host implements, `MemoryAssuranceStore`
