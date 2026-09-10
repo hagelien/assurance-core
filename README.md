@@ -222,8 +222,8 @@ cannot open is worse than no comment.
 Publishing is automated by `.github/workflows/publish.yml` and supports several
 ways to cut the same version:
 
-- push a `v*` tag such as `v0.3.0`;
-- push a `release/v*` branch such as `release/v0.3.0`;
+- push a `v*` tag such as `v0.4.0`;
+- push a `release/v*` branch such as `release/v0.4.0`;
 - publish a GitHub release;
 - use `workflow_dispatch` to retry a failed publish.
 
