@@ -116,28 +116,50 @@ describe('a packet carrying a peer signal is refused', () => {
   });
 });
 
-describe('the allowed keys are the object under review, not a peer signal', () => {
-  it('permits a submission that is itself a written assessment', () => {
-    // A domain where the reviewed object is a review: withholding these would
-    // leave nothing to review.
+describe('a host may allow keys that are the object under review, not a peer signal', () => {
+  // A domain where the reviewed object is itself a judgment — a summary of a
+  // court's verdict, say — legitimately carries a key the guard would ban.
+  it('refuses such a key unless the host allows it', () => {
+    expect(() =>
+      sealReviewPacket({ version, proposed: { verdictSummary: 'Upheld on appeal.' } }),
+    ).toThrow(ReviewPacketLeakError);
+  });
+
+  it('seals it once the host names it, in any spelling', () => {
     const packet = sealReviewPacket({
       version,
-      proposed: {
-        reviewMarkdown: 'The method is sound.',
-        reviewConfidence: 0.8,
-        readInFull: true,
-        overallScore: 4,
-      },
+      proposed: { verdictSummary: 'Upheld on appeal.' },
+      allowKeys: ['verdict_summary'],
     });
-    expect(packet.proposed.reviewMarkdown).toBe('The method is sound.');
+    expect(packet.proposed.verdictSummary).toBe('Upheld on appeal.');
   });
 
   it('does not let the escape hatch widen by substring', () => {
-    // `overallScoreOfApprovals` is not `overallscore`. If the allow-list were
+    // `verdictSummaryOfPeers` is not `verdictsummary`. If the allow-list were
     // matched by stem the way the ban is, this would seal.
     expect(() =>
-      sealReviewPacket({ version, proposed: { overallScoreOfApprovals: 3 } }),
+      sealReviewPacket({
+        version,
+        proposed: { verdictSummaryOfPeers: 'two approve' },
+        allowKeys: ['verdictSummary'],
+      }),
     ).toThrow(ReviewPacketLeakError);
+  });
+
+  it('allows no host field by default', () => {
+    // The core once carried one host's field names here. Every host's own
+    // content keys are its own to declare.
+    expect(() =>
+      sealReviewPacket({ version, proposed: { approvalNote: 'x' } }),
+    ).toThrow(ReviewPacketLeakError);
+  });
+});
+
+describe('the packet names the whole version', () => {
+  it('carries both halves of the reference', () => {
+    const packet = sealReviewPacket({ version, proposed: {} });
+    expect(packet.proposalVersion).toEqual(version.ref);
+    expect(packet.proposalVersionId).toBe(version.ref.versionId);
   });
 });
 

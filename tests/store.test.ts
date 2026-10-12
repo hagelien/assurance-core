@@ -94,6 +94,76 @@ describe('the contract has teeth', () => {
     break: (store: MemoryAssuranceStore) => void;
   }> = [
     {
+      what: 'reports an upheld dispute as merely closed',
+      catchesContaining: 'leaves it upheld',
+      break(store) {
+        // The flaw this clause exists for: an objection found correct reads
+        // exactly like one dismissed, so nothing downstream can hold on it.
+        const disputes = store.disputes.bind(store);
+        store.disputes = async (ref) =>
+          (await disputes(ref)).map((d) => ({ ...d, upheld: false }));
+      },
+    },
+    {
+      what: 'drops the reason a dispute was raised with',
+      catchesContaining: 'keeps the reason',
+      break(store) {
+        const disputes = store.disputes.bind(store);
+        store.disputes = async (ref) =>
+          (await disputes(ref)).map((d) => ({ ...d, rationale: null }));
+      },
+    },
+    {
+      what: 'ignores the mode a caller narrows latestDecision to',
+      catchesContaining: 'narrowed to the binding decision',
+      break(store) {
+        const decision = store.latestDecision.bind(store);
+        store.latestDecision = async (ref) => decision(ref);
+      },
+    },
+    {
+      what: 'keeps only the outcome of a decision',
+      catchesContaining: 'keeps its explanation',
+      break(store) {
+        const decision = store.latestDecision.bind(store);
+        store.latestDecision = async (ref, query) => {
+          const found = await decision(ref, query);
+          return found === null ? null : { ...found, matchedRuleIds: [], unmet: [] };
+        };
+      },
+    },
+    {
+      what: 'applies a default page size when no limit is given',
+      catchesContaining: 'no limit lists every open proposal',
+      break(store) {
+        const list = store.listOpenProposals.bind(store);
+        store.listOpenProposals = async (space, query) =>
+          list(space, { ...query, limit: query?.limit ?? 50 });
+      },
+    },
+    {
+      what: 'accepts an assessment on a version it does not hold',
+      catchesContaining: 'unknown version is refused',
+      break(store) {
+        // Write straight to the history, past the existence check.
+        const internal = store as unknown as { assessments: StoredAssessment[] };
+        store.recordAssessment = async (input) => {
+          const record: StoredAssessment = {
+            assessmentId: `forged-${internal.assessments.length}`,
+            version: input.version,
+            assessorRef: input.assessorRef,
+            assessorKind: input.assessorKind,
+            verdict: input.verdict,
+            implicit: input.implicit ?? false,
+            supersedesAssessmentId: input.supersedesAssessmentId ?? null,
+            recordedAt: input.recordedAt,
+          };
+          internal.assessments.push(record);
+          return record;
+        };
+      },
+    },
+    {
       what: 'returns every assessment, including superseded ones',
       catchesContaining: 'revises holds one standing assessment',
       break(store) {

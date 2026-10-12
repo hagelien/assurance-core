@@ -19,6 +19,11 @@ export interface PolicyDecision {
   readonly allowed: boolean;
   readonly policyId: PolicyId;
   readonly policyVersion: PolicyVersion;
+  /**
+   * Fingerprint of the policy definition itself — see
+   * `PolicySet.definitionFingerprint`.
+   */
+  readonly policyFingerprint: Fingerprint;
   /** Stable hash of the evaluated context; equal fingerprints mean equal inputs. */
   readonly inputFingerprint: Fingerprint;
   /** Rules that applied, in evaluation order. */
@@ -57,7 +62,8 @@ export function stableStringify(value: unknown): string {
  * characters.
  *
  * Deliberately **not** cryptographic and deliberately not `node:crypto`: this
- * module is bundled into the browser build, and the fingerprint's only job is
+ * package takes no dependency, not even on a runtime's built-ins, and the
+ * fingerprint's only job is
  * change detection and audit correlation ("were these the same inputs?"). It is
  * never a security boundary — nothing is authorised by matching a fingerprint.
  */
@@ -119,6 +125,11 @@ export function fingerprintPolicyContext(context: PolicyContext): Fingerprint {
     risk: { level: context.risk.level, tags: canonicalSet(context.risk.tags) },
     assurance: {
       ...context.assurance,
+      // Dropped when zero, so a context that predates the field fingerprints
+      // as it always did. Adding a count to the profile must not make every
+      // stored fingerprint disagree with a re-evaluation of the same facts —
+      // that is exactly the signal the fingerprint exists to give.
+      disputesUpheld: context.assurance.disputesUpheld || undefined,
       approvalCapabilities: canonicalSet(context.assurance.approvalCapabilities),
       humanApprovalCapabilities: canonicalSet(
         context.assurance.humanApprovalCapabilities,
@@ -143,4 +154,25 @@ export function describeDecision(decision: PolicyDecision): string {
 /** The first unmet requirement, or `null` when the decision allows publication. */
 export function firstUnmet(decision: PolicyDecision): RequirementOutcome | null {
   return decision.unmet[0] ?? null;
+}
+
+/**
+ * How a shadow decision compares with what actually happened.
+ *
+ * The reason `DecisionMode` has a `shadow` value: a policy is introduced by
+ * running it beside whatever decides today, and the comparison is the whole
+ * point. Which way a disagreement points is what matters, and the two are not
+ * symmetric. A shadow policy that would have held something that published is
+ * *stricter* — the cost of switching is delay. One that would have published
+ * something that was held is *more permissive* — the cost is publishing what
+ * people refused, and no policy should be made binding while that happens.
+ */
+export type ShadowComparison = 'agree' | 'stricter' | 'more_permissive';
+
+export function compareShadowDecision(
+  shadow: { readonly allowed: boolean },
+  actual: { readonly allowed: boolean },
+): ShadowComparison {
+  if (shadow.allowed === actual.allowed) return 'agree';
+  return shadow.allowed ? 'more_permissive' : 'stricter';
 }

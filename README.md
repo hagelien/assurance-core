@@ -150,7 +150,7 @@ Two agents approve it. The quorum of two is satisfied, and it still may not
 publish:
 
 ```text
-adr-review@v1: held - assurance.humanApproval (0 human approval(s))
+adr-review@v1: held — assurance.humanApproval (0 human approval(s))
   blocked by: at least one approval from a human
 ```
 
@@ -172,8 +172,9 @@ question; *whose*, and of what kind, usually is.
 | `AssuranceProfile` | What a version has actually accumulated: counts, composition, capabilities. Built by `tallyAssurance`. |
 | `RiskProfile` | The host's classification: a level plus free-form tags. The core never computes this. |
 | `Requirement` | A composable, self-explaining predicate: `independentApprovals(2)`, `humanApproval()`, ... |
-| `PolicySet` | Versioned rules. Built with `policy(id, version)`, evaluated against a `PolicyContext`. |
-| `PolicyDecision` | The auditable output: allowed or held, which rule, which requirements, and a fingerprint of the inputs. |
+| `PolicySet` | Versioned rules. Built with `policy(id, version)`, evaluated against a `PolicyContext`. Carries a `definitionFingerprint` of what it requires. |
+| `PolicyDecision` | The auditable output: allowed or held, which rule, which requirements, and fingerprints of the inputs and of the policy definition. |
+| `StoredDecision` | A decision as the store keeps it, breakdown included. Build the input with `decisionRecord(decision, ...)`. |
 
 ### Two distinctions worth understanding early
 
@@ -183,6 +184,12 @@ be **server-owned**. That is a security boundary, not a naming convention: a
 value the caller could have chosen must never satisfy an assurance requirement.
 A model string an agent reports about itself is audit metadata; the tier your
 server recorded when the assessment was written may be an assurance capability.
+
+**Open vs upheld disputes.** Closing an objection and finding it correct are
+different facts. `noOpenDisputes()` holds a version while an objection is being
+heard and stops the moment any ruling closes it, including the ruling that it
+was right. `noUpheldDisputes()` is what keeps holding after that. A policy that
+honours formal disputes almost always wants both.
 
 **Design target vs effective quorum.** A policy states the quorum it wants. A
 small reviewer pool may not be able to reach it. `ReviewerPoolState` carries
@@ -197,6 +204,13 @@ published under the new rule. Requirement ids and rule ids are stable strings
 that end up in persisted records: renaming one is a breaking change, and rule
 ids are given explicitly rather than derived from position so reordering a file
 cannot silently re-point historical records at a different rule.
+
+A version label is a promise not to edit a policy in place, and a promise is
+all it is. So every decision also carries the policy's `definitionFingerprint`:
+two decisions naming `v1` with different fingerprints were made under two
+different rules. A stored decision keeps its breakdown too (the rules that
+applied and every unmet requirement), so it can still say *why* it held a
+version after the inputs it was taken over are gone.
 
 ## Development
 
@@ -236,12 +250,12 @@ the package artifact to the workflow and commit that built it. Repository npm
 authentication is supplied through `NPM_TOKEN`; if that credential is missing or
 invalid, the publish fails loudly.
 
-The `release/v0.3.0` path has been exercised successfully, so release automation
-is operational rather than merely configured.
+The `release/v0.3.0` and `v0.4.0` releases went out through this workflow, so
+release automation is operational rather than merely configured.
 
 ## Status
 
-`0.4.0`, and honest about it. `0.2.0` added the store port, conformance suite,
+`0.5.0`, and honest about it. `0.2.0` added the store port, conformance suite,
 review queue and review packet. `0.3.0` widened one thing the first real adapter
 could not express: a dispute ruling may be `superseded`, meaning a replacement
 dispute now governs, and it is the one ruling that does **not** close. Folding
@@ -251,7 +265,8 @@ meaning of the record.
 That is the intended way for this interface to grow: a word earns a place when
 a real store loses meaning without it, not when one might.
 
-`0.4.0` adds no vocabulary. It is the release where the queue's paging was made
+`0.4.0` added `selectReviewQueueFromStore` and its window ceiling,
+`MAX_CANDIDATE_WINDOW`. It is the release where the queue's paging was made
 to hold under a real backlog, and where two clauses the contract had been
 assuming were written down and checked.
 
@@ -271,12 +286,52 @@ upgrading an existing adapter. **Every timestamp the port returns must be an
 ISO-8601 instant in UTC with milliseconds** — `2020-01-01T00:00:00.000Z`. The
 offset and the fractional width are both part of it, because
 `2020-01-01T01:00:00+01:00` is the same instant as `00:00:00Z` and sorts after
-it, so a queue promising oldest-first quietly stops delivering it. **Row counts
-must be integers**, and the value a write hands back is covered by the contract
-rather than left to the adapter. The conformance suite checks all of this now,
-so an adapter that passed against `0.3.0` may report failures against `0.4.0`.
-Those failures are the point: the behaviour they name was always required, and
-was previously enforced only by whichever host happened to get it right.
+it, so a queue promising oldest-first quietly stops delivering it. That covers
+the rows a write hands back as well as the ones a read returns. **A submitted
+version is never older than its own proposal**, which is what lets the queue
+stop before reading a whole backlog. The conformance suite checks both, so an
+adapter that passed against `0.3.0` may report failures against `0.4.0`. Those
+failures are the point: the behaviour they name was always required, and was
+previously enforced only by whichever host happened to get it right.
+
+`0.5.0` fixes a flaw and keeps what decisions and disputes used to lose.
+
+- **An upheld dispute stopped holding the version it objected to.** A ruling of
+  `upheld` closes a dispute, so `noOpenDisputes()` was satisfied by exactly the
+  outcome that says the version is wrong. Disputes now report `upheld`, the
+  tally counts `disputesUpheld`, and `noUpheldDisputes()` holds on it. The
+  original host had worked around this in its own code. That is the same signal
+  that added `superseded`: a real store lost meaning without the word.
+- **Stored records keep their reasons.** A dispute keeps its `rationale`. A
+  decision keeps `matchedRuleIds`, its `unmet` requirements and the policy's
+  `definitionFingerprint`. `decisionRecord()` builds the input from a
+  `PolicyDecision`, so the breakdown is not left out by hand.
+  `latestDecision(ref, { mode: 'authoritative' })` finds the decision that bound
+  a version even when a shadow evaluation was recorded after it.
+- **Shadow mode can be read.** `compareShadowDecision()` says whether a shadow
+  policy agrees with what happened, would have been stricter, or would have
+  been more permissive. Only the last of these should stop a policy from being
+  made binding.
+- **The queue can exclude a reviewer with a stake in the outcome**, through
+  `conflictedRefs` on a candidate. A self-review grant does not lift it.
+- **Review packets name the whole version** (`proposalVersion`). They also no
+  longer carry one host's field names in their allow-list: a host whose content
+  trips the peer-signal guard passes its own `allowKeys`.
+
+Upgrading an adapter to 0.5 means:
+
+- **Disputes:** returning `upheld` and `rationale` on every dispute.
+- **Decisions:** storing and returning the decision breakdown, and honouring
+  the `mode` narrowing on `latestDecision`.
+- **Refusals:** refusing an assessment or a dispute on a version the store
+  does not hold, and a ruling on a dispute it does not hold.
+- **Listing:** treating an omitted `limit` on `listOpenProposals` as "all".
+- **Profiles:** a host that assembles an `AssuranceProfile` by hand rather than
+  through `tallyAssurance` must add `disputesUpheld`. A zero is left out of the
+  input fingerprint, so existing fingerprints are unchanged.
+
+The conformance suite checks all of these. A host that relied on the packet's
+built-in allow-list now passes those keys itself.
 
 Two hosts use it: the reference work it was extracted from, and the ADR log in
 `examples/`. The second is deliberately small, so "it fits two domains" is a

@@ -24,14 +24,14 @@ import {
 export const AGENT_AUTHOR: ActorSnapshot = {
   actorRef: 'user:1',
   kind: 'agent',
-  capabilities: ['edit.parameter.submit'],
+  capabilities: ['proposal.submit'],
   assuranceCapabilities: [],
 };
 
 export const HUMAN_AUTHOR: ActorSnapshot = {
   actorRef: 'user:2',
   kind: 'human',
-  capabilities: ['edit.parameter.submit'],
+  capabilities: ['proposal.submit'],
   assuranceCapabilities: [],
 };
 
@@ -61,7 +61,7 @@ export function makeContext(
 ): PolicyContext {
   return {
     space: overrides.space ?? 'demo',
-    targetType: overrides.targetType ?? 'pending_edit',
+    targetType: overrides.targetType ?? 'article_edit',
     proposalVersionId: overrides.proposalVersionId ?? 'pe:1',
     author: overrides.author ?? AGENT_AUTHOR,
     risk: overrides.risk ?? riskProfile('low'),

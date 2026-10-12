@@ -85,11 +85,14 @@ import type {
   DisputeState,
   EvidenceRequirementState,
 } from './assurance.js';
+import type { PolicyDecision } from './decisions.js';
 import type { RiskProfile } from './risk.js';
 import type {
   Fingerprint,
   PolicyId,
+  PolicyRuleId,
   PolicyVersion,
+  RequirementId,
   ProposalVersionRef,
   SpaceId,
   TargetRef,
@@ -177,6 +180,18 @@ export interface StoredAssessment extends Assessment {
  */
 export interface StoredDispute extends DisputeState {
   readonly version: ProposalVersionRef;
+  /**
+   * Whether the dispute was settled in the objector's favour — see
+   * `disputeIsUpheld`. Required here, where `DisputeState` leaves it optional:
+   * a store holds the rulings, so it always knows.
+   */
+  readonly upheld: boolean;
+  /**
+   * Why it was raised, as the objector put it. Kept because an objection
+   * without its reason cannot be ruled on by anyone who did not see it raised,
+   * and a year later that is everyone.
+   */
+  readonly rationale: string | null;
   readonly openedAt: Timestamp;
 }
 
@@ -218,6 +233,30 @@ export function rulingClosesDispute(
 }
 
 /**
+ * Whether a dispute's rulings settle it in the objector's favour: the most
+ * recent ruling that closes it is `upheld`.
+ *
+ * Closing and upholding are different facts, and treating them as one was a
+ * real flaw: `noOpenDisputes` stops holding a version the moment any closing
+ * ruling lands, so an objection found *correct* released the version it
+ * objected to. An upheld dispute is closed — nobody needs to rule on it again —
+ * and it still says the version is wrong. `noUpheldDisputes` is what reads it.
+ *
+ * The most recent closing ruling decides rather than any upheld ruling, so a
+ * host that lets a ruling be revisited (upheld, then overturned on appeal as
+ * `rejected`) reports the outcome that now stands.
+ */
+export function disputeIsUpheld(
+  rulings: readonly Pick<StoredDisputeRuling, 'ruling'>[],
+): boolean {
+  for (let i = rulings.length - 1; i >= 0; i -= 1) {
+    const ruling = rulings[i]!.ruling;
+    if (rulingClosesDispute(ruling)) return ruling === 'upheld';
+  }
+  return false;
+}
+
+/**
  * Whether a decision was binding.
  *
  * `shadow` exists because the honest way to introduce a policy engine is to
@@ -239,10 +278,33 @@ export interface StoredDecision {
   readonly version: ProposalVersionRef;
   readonly policyId: PolicyId;
   readonly policyVersion: PolicyVersion;
+  /**
+   * The policy definition the decision was evaluated against — see
+   * `PolicySet.definitionFingerprint` — or null where the caller did not
+   * record one. It is what tells "v1 as written then" from "v1 as edited in
+   * place since", which the version string alone cannot.
+   */
+  readonly policyFingerprint: Fingerprint | null;
   readonly allowed: boolean;
   readonly inputFingerprint: Fingerprint;
   readonly mode: DecisionMode;
+  /** The rules that applied, in evaluation order. */
+  readonly matchedRuleIds: readonly PolicyRuleId[];
+  /**
+   * Why it was held: every unmet requirement, in evaluation order. Empty when
+   * allowed. Without this a stored decision says *that* a version was held and
+   * never *why*, and the only way to recover the reason is to re-evaluate
+   * against inputs that may no longer exist.
+   */
+  readonly unmet: readonly DecisionReason[];
   readonly evaluatedAt: Timestamp;
+}
+
+/** One unmet requirement, as a stored decision keeps it. */
+export interface DecisionReason {
+  readonly requirementId: RequirementId;
+  readonly ruleId: PolicyRuleId | null;
+  readonly detail: string | null;
 }
 
 /** What a caller supplies to record an assessment; the store assigns the rest. */
@@ -282,14 +344,65 @@ export interface RuleDisputeInput {
   readonly ruledAt: Timestamp;
 }
 
+/**
+ * What a caller supplies to record a decision. `decisionRecord` builds one from
+ * a `PolicyDecision`, which is the way to call this: assembled by hand, the
+ * breakdown is the part that gets left out.
+ */
 export interface RecordDecisionInput {
   readonly version: ProposalVersionRef;
   readonly policyId: PolicyId;
   readonly policyVersion: PolicyVersion;
+  readonly policyFingerprint?: Fingerprint | null;
   readonly allowed: boolean;
   readonly inputFingerprint: Fingerprint;
   readonly mode: DecisionMode;
+  readonly matchedRuleIds?: readonly PolicyRuleId[];
+  readonly unmet?: readonly DecisionReason[];
   readonly evaluatedAt: Timestamp;
+}
+
+/** Narrowing for `latestDecision`. */
+export interface DecisionQuery {
+  /**
+   * Only decisions taken in this mode. Asking for `authoritative` is how a
+   * caller finds the decision that actually bound a version: a shadow
+   * evaluation recorded afterwards is newer, and without this would be the
+   * one returned.
+   */
+  readonly mode?: DecisionMode;
+}
+
+/**
+ * The record to store for a policy decision.
+ *
+ * The one place a `PolicyDecision` is reduced to its stored form, so the
+ * breakdown cannot be dropped by a host that only thought to copy `allowed`.
+ */
+export function decisionRecord(
+  decision: PolicyDecision,
+  args: {
+    version: ProposalVersionRef;
+    mode: DecisionMode;
+    evaluatedAt: Timestamp;
+  },
+): RecordDecisionInput {
+  return {
+    version: args.version,
+    policyId: decision.policyId,
+    policyVersion: decision.policyVersion,
+    policyFingerprint: decision.policyFingerprint,
+    allowed: decision.allowed,
+    inputFingerprint: decision.inputFingerprint,
+    mode: args.mode,
+    matchedRuleIds: [...decision.matchedRuleIds],
+    unmet: decision.unmet.map((o) => ({
+      requirementId: o.requirementId,
+      ruleId: o.ruleId ?? null,
+      detail: o.detail ?? null,
+    })),
+    evaluatedAt: args.evaluatedAt,
+  };
 }
 
 /** Narrowing for `listOpenProposals`. All fields are optional and AND together. */
@@ -353,7 +466,7 @@ export interface AssuranceStore {
     versions: readonly ProposalVersionRef[],
   ): Promise<readonly StoredAssessment[]>;
 
-  /** Disputes against a version, open and settled. */
+  /** Disputes against a version, open and settled, oldest first. */
   disputes(ref: ProposalVersionRef): Promise<readonly StoredDispute[]>;
 
   /** Rulings on one dispute, oldest first. */
@@ -369,8 +482,15 @@ export interface AssuranceStore {
     ref: ProposalVersionRef,
   ): Promise<readonly EvidenceRequirementState[]>;
 
-  /** The most recent decision recorded against a version, in either mode. */
-  latestDecision(ref: ProposalVersionRef): Promise<StoredDecision | null>;
+  /**
+   * The most recent decision recorded against a version — in either mode, or
+   * only in `query.mode` when given. A store that ignores the narrowing hands
+   * back a later shadow evaluation as though it had bound the version.
+   */
+  latestDecision(
+    ref: ProposalVersionRef,
+    query?: DecisionQuery,
+  ): Promise<StoredDecision | null>;
 
   // ── Appends ──────────────────────────────────────────────────────────────
 
@@ -392,7 +512,16 @@ export interface AssuranceStore {
  * proposals' review state.
  */
 export function formatVersionRef(ref: ProposalVersionRef): string {
-  return `${ref.proposalId}#${ref.versionId}`;
+  return `${escapeRefPart(ref.proposalId)}#${escapeRefPart(ref.versionId)}`;
+}
+
+/**
+ * Escape the separator, so two different references can never format alike:
+ * unescaped, `a#b` + `c` and `a` + `b#c` both read `a#b#c`. Ids without `#` or
+ * `\` — every id a host is likely to issue — format exactly as before.
+ */
+function escapeRefPart(part: string): string {
+  return part.replace(/\\/g, '\\\\').replace(/#/g, '\\#');
 }
 
 /** Whether two version references address the same version. */

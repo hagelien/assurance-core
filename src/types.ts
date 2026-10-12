@@ -21,8 +21,8 @@
 export type SpaceId = string;
 
 /**
- * The host's name for a kind of governed object (`wiki_fact`, `param_entry`,
- * …). The core treats it as an opaque key into the host's adapter registry.
+ * The host's name for a kind of governed object (`article`, `decision_record`,
+ * …). The core treats it as an opaque key and never interprets it.
  */
 export type TargetType = string;
 

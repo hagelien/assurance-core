@@ -29,6 +29,7 @@ import type {
   ActorKind,
   ActorSnapshot,
   AssuranceStore,
+  DecisionQuery,
   EvidenceRequirementState,
   OpenDisputeInput,
   OpenProposalQuery,
@@ -44,7 +45,12 @@ import type {
   StoredProposal,
   StoredProposalVersion,
 } from '../../src/index.js';
-import { formatVersionRef, sameVersion } from '../../src/index.js';
+import {
+  disputeIsUpheld,
+  formatVersionRef,
+  rulingClosesDispute,
+  sameVersion,
+} from '../../src/index.js';
 import type { AdrLog, ChangeRequest, Draft } from './log.js';
 
 export const ADR_SPACE: SpaceId = 'adr';
@@ -189,8 +195,7 @@ export class AdrAssuranceStore implements AssuranceStore {
    *
    * Both forms of supersession are honoured: an explicit
    * `supersedesAssessmentId`, and simply recording again on the same version.
-   * The port's conformance suite checks the first; the second is this host
-   * being defensive about its own callers.
+   * The port's conformance suite checks both.
    */
   private standing(pool: readonly StoredAssessment[]): StoredAssessment[] {
     const replaced = new Set(
@@ -210,12 +215,18 @@ export class AdrAssuranceStore implements AssuranceStore {
   async disputes(ref: ProposalVersionRef): Promise<readonly StoredDispute[]> {
     return this.disputeRecords
       .filter((d) => sameVersion(d.version, ref))
-      // `open` is derived from the rulings rather than stored beside them, so
-      // the projection cannot drift from the history it summarises.
-      .map((d) => ({
-        ...d,
-        open: !this.rulings.some((r) => r.disputeId === d.disputeId),
-      }));
+      // `open` and `upheld` are derived from the rulings rather than stored
+      // beside them, so the projection cannot drift from the history it
+      // summarises. The core says which rulings close and which uphold; a host
+      // that decided that for itself is how "superseded" once read as closed.
+      .map((d) => {
+        const rulings = this.rulings.filter((r) => r.disputeId === d.disputeId);
+        return {
+          ...d,
+          open: !rulings.some((r) => rulingClosesDispute(r.ruling)),
+          upheld: disputeIsUpheld(rulings),
+        };
+      });
   }
 
   async disputeRulings(disputeId: string): Promise<readonly StoredDisputeRuling[]> {
@@ -244,14 +255,24 @@ export class AdrAssuranceStore implements AssuranceStore {
     ];
   }
 
-  async latestDecision(ref: ProposalVersionRef): Promise<StoredDecision | null> {
-    const rows = this.decisions.filter((d) => sameVersion(d.version, ref));
+  async latestDecision(
+    ref: ProposalVersionRef,
+    query: DecisionQuery = {},
+  ): Promise<StoredDecision | null> {
+    const rows = this.decisions.filter(
+      (d) =>
+        sameVersion(d.version, ref) &&
+        (query.mode === undefined || d.mode === query.mode),
+    );
     return rows[rows.length - 1] ?? null;
   }
 
   // ── Appends ──────────────────────────────────────────────────────────────
 
   async recordAssessment(input: RecordAssessmentInput): Promise<StoredAssessment> {
+    if (!(await this.getVersion(input.version))) {
+      throw new Error(`no draft ${input.version.versionId} on ${input.version.proposalId}`);
+    }
     const record: StoredAssessment = {
       assessmentId: this.id('assessment'),
       version: input.version,
@@ -270,12 +291,17 @@ export class AdrAssuranceStore implements AssuranceStore {
   }
 
   async openDispute(input: OpenDisputeInput): Promise<StoredDispute> {
+    if (!(await this.getVersion(input.version))) {
+      throw new Error(`no draft ${input.version.versionId} on ${input.version.proposalId}`);
+    }
     const record: StoredDispute = {
       disputeId: this.id('dispute'),
       version: input.version,
       openedByRef: input.openedByRef,
       openedByKind: input.openedByKind,
       open: true,
+      upheld: false,
+      rationale: input.rationale ?? null,
       openedAt: input.openedAt,
     };
     this.disputeRecords.push(record);
@@ -304,9 +330,12 @@ export class AdrAssuranceStore implements AssuranceStore {
       version: input.version,
       policyId: input.policyId,
       policyVersion: input.policyVersion,
+      policyFingerprint: input.policyFingerprint ?? null,
       allowed: input.allowed,
       inputFingerprint: input.inputFingerprint,
       mode: input.mode,
+      matchedRuleIds: [...(input.matchedRuleIds ?? [])],
+      unmet: (input.unmet ?? []).map((u) => ({ ...u })),
       evaluatedAt: input.evaluatedAt,
     };
     this.decisions.push(record);

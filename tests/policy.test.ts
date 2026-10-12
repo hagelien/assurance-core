@@ -38,7 +38,7 @@ function marker(id: string, met: boolean): Requirement {
 
 describe('matchesRule', () => {
   const context = makeContext({
-    targetType: 'param_entry',
+    targetType: 'record_entry',
     risk: riskProfile('medium', ['calculation_driving']),
     flags: ['shadow_mode'],
   });
@@ -50,10 +50,10 @@ describe('matchesRule', () => {
 
   it('ANDs every present field', () => {
     expect(
-      matchesRule({ targetType: 'param_entry', risk: 'medium' }, context),
+      matchesRule({ targetType: 'record_entry', risk: 'medium' }, context),
     ).toBe(true);
     expect(
-      matchesRule({ targetType: 'param_entry', risk: 'high' }, context),
+      matchesRule({ targetType: 'record_entry', risk: 'high' }, context),
     ).toBe(false);
   });
 
@@ -61,7 +61,7 @@ describe('matchesRule', () => {
     expect(matchesRule({ authorKind: 'agent' }, context)).toBe(true);
     expect(matchesRule({ authorKind: ['human', 'agent'] }, context)).toBe(true);
     expect(matchesRule({ authorKind: ['human', 'system'] }, context)).toBe(false);
-    expect(matchesRule({ targetType: ['wiki_fact', 'param_entry'] }, context)).toBe(
+    expect(matchesRule({ targetType: ['note', 'record_entry'] }, context)).toBe(
       true,
     );
   });

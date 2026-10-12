@@ -23,11 +23,12 @@
 import {
   assessmentFromActor,
   candidatesFromStore,
-  fingerprintPolicyContext,
   humanApproval,
   independentApprovals,
   noDisputingAssessments,
   noOpenDisputes,
+  noUpheldDisputes,
+  decisionRecord,
   policy,
   reviewerPoolState,
   sealReviewPacket,
@@ -62,6 +63,7 @@ export const ADR_POLICY: PolicySet = policy('adr-review', 'v1')
       independentApprovals(2),
       noDisputingAssessments(),
       noOpenDisputes(),
+      noUpheldDisputes(),
     ],
   })
   .rule({
@@ -180,12 +182,10 @@ export class AdrHost {
     const assessments = (
       await this.options.store.currentAssessments(ref)
     ).map(toAssessment);
-    const disputes = (await this.options.store.disputes(ref)).map((d) => ({
-      disputeId: d.disputeId,
-      openedByRef: d.openedByRef,
-      openedByKind: d.openedByKind,
-      open: d.open,
-    }));
+    // Handed over whole. Copying the fields this host thought mattered is
+    // how an earlier version of it dropped `upheld`, and with it the one fact
+    // that keeps a correct objection holding the record it objected to.
+    const disputes = await this.options.store.disputes(ref);
 
     return {
       space: ADR_SPACE,
@@ -221,17 +221,25 @@ export class AdrHost {
     decision: PolicyDecision;
     merged: boolean;
   }> {
+    // Only the change request's current draft, and only while it is open: an
+    // earlier draft's approvals were for words that are no longer proposed.
+    const proposal = await this.options.store.getProposal(ref.proposalId);
+    if (!proposal?.open || proposal.currentVersionId !== ref.versionId) {
+      throw new Error(
+        `draft ${ref.versionId} is not the open, current draft of ${ref.proposalId}`,
+      );
+    }
     const context = await this.contextFor(ref);
     const decision = ADR_POLICY.evaluate(context);
-    await this.options.store.recordDecision({
-      version: ref,
-      policyId: ADR_POLICY.id,
-      policyVersion: ADR_POLICY.version,
-      allowed: decision.allowed,
-      inputFingerprint: fingerprintPolicyContext(context),
-      mode: 'authoritative',
-      evaluatedAt: this.stamp(),
-    });
+    // `decisionRecord` keeps the breakdown, so the stored decision can still
+    // say which requirement held it once this context is long gone.
+    await this.options.store.recordDecision(
+      decisionRecord(decision, {
+        version: ref,
+        mode: 'authoritative',
+        evaluatedAt: this.stamp(),
+      }),
+    );
     if (!decision.allowed) return { decision, merged: false };
 
     // The host act. There is no core primitive for this and there should not

@@ -225,7 +225,7 @@ describe('a foreign store satisfies the port', () => {
     expect(results.length).toBeGreaterThan(15);
   });
 
-  it('leaves exactly the two clauses its shape cannot express', async () => {
+  it('leaves exactly the three clauses its shape cannot express', async () => {
     // Pinned, so a future skip has to be added deliberately rather than
     // arriving as a quietly shorter run.
     const skipped = conformanceSkipped(await runStoreConformance(makeHarness));
@@ -318,6 +318,40 @@ describe('a full review runs end to end', () => {
       ruledAt: '2024-01-02T00:00:00.000Z',
     });
     expect((await host.tryPublish(ref)).merged).toBe(true);
+  });
+
+  it('stays held when the objection is upheld, and says why', async () => {
+    // The flaw 0.5 fixed: an upheld dispute is closed, so a policy reading
+    // only open disputes published the record the objection was right about.
+    const { host, store, ref } = world({ supersedes: [] });
+    await host.assess(AGENT_A, ref, 'approve');
+    await host.assess(AGENT_B, ref, 'approve');
+    const dispute = await store.openDispute({
+      version: ref,
+      openedByRef: PRINCIPAL.actorRef,
+      openedByKind: 'human',
+      rationale: 'This contradicts ADR-3, which is still accepted.',
+      openedAt: '2024-01-01T00:00:00.000Z',
+    });
+    await store.ruleDispute({
+      disputeId: dispute.disputeId,
+      ruling: 'upheld',
+      ruledByRef: PRINCIPAL.actorRef,
+      ruledAt: '2024-01-02T00:00:00.000Z',
+    });
+    expect((await host.tryPublish(ref)).merged).toBe(false);
+
+    const held = await store.latestDecision(ref, { mode: 'authoritative' });
+    expect(held!.allowed).toBe(false);
+    expect(held!.policyFingerprint).toBe(ADR_POLICY.definitionFingerprint);
+    expect(held!.unmet.map((u) => u.requirementId)).toEqual(['disputes.noneUpheld']);
+  });
+
+  it('refuses to publish anything but the open, current draft', async () => {
+    const { host, ref } = world({ supersedes: [] });
+    await expect(
+      host.tryPublish({ proposalId: ref.proposalId, versionId: '999' }),
+    ).rejects.toThrow(/not the open, current draft/);
   });
 
   it('a reviewer who changes their mind counts once, with the later verdict', async () => {
