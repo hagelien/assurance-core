@@ -141,6 +141,19 @@ function truthy(value: unknown, what: string): void {
   if (!value) throw new ContractViolation(`${what}: expected a truthy value`);
 }
 
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+
+/** The write must be refused — a rejected promise or a synchronous throw. */
+async function refuses(write: () => Promise<unknown>, what: string): Promise<void> {
+  let refused = false;
+  try {
+    await write();
+  } catch {
+    refused = true;
+  }
+  if (!refused) throw new ContractViolation(`${what}: the store accepted it`);
+}
+
 const T0 = '2020-01-01T00:00:00.000Z';
 const T1 = '2020-01-02T00:00:00.000Z';
 const T2 = '2020-01-03T00:00:00.000Z';
@@ -710,6 +723,260 @@ const CHECKS: readonly Check[] = [
       truthy(latest, 'latestDecision returned null after two decisions');
       equal(latest!.allowed, true, 'latest decision outcome');
       equal(latest!.mode, 'authoritative', 'latest decision mode');
+    },
+  },
+  {
+    name: 'an upheld ruling closes the dispute and leaves it upheld',
+    async run(h) {
+      const { store, seed } = h;
+      // Closed and upheld are separate facts. A store that reported only
+      // `open` let an objection found correct release the version it objected
+      // to, because "no open dispute" was then true.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const { ref } = await seed.version({ proposalId });
+      const upheld = await store.openDispute({
+        version: ref,
+        openedByRef: 'user:2',
+        openedByKind: 'human',
+        openedAt: T0,
+      });
+      const rejected = await store.openDispute({
+        version: ref,
+        openedByRef: 'user:4',
+        openedByKind: 'human',
+        openedAt: T0,
+      });
+      equal(
+        (await store.disputes(ref)).map((d) => d.upheld),
+        [false, false],
+        'disputes start not upheld',
+      );
+      await store.ruleDispute({
+        disputeId: upheld.disputeId,
+        ruling: 'upheld',
+        ruledByRef: 'user:3',
+        ruledAt: T1,
+      });
+      await store.ruleDispute({
+        disputeId: rejected.disputeId,
+        ruling: 'rejected',
+        ruledByRef: 'user:3',
+        ruledAt: T1,
+      });
+      const after = new Map(
+        (await store.disputes(ref)).map((d) => [d.disputeId, d] as const),
+      );
+      equal(after.get(upheld.disputeId)?.open, false, 'an upheld dispute is closed');
+      equal(after.get(upheld.disputeId)?.upheld, true, 'an upheld dispute says so');
+      equal(after.get(rejected.disputeId)?.upheld, false, 'a rejected dispute is not upheld');
+    },
+  },
+  {
+    name: 'a dispute keeps the reason it was raised with',
+    async run(h) {
+      const { store, seed } = h;
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const { ref } = await seed.version({ proposalId });
+      await store.openDispute({
+        version: ref,
+        openedByRef: 'user:2',
+        openedByKind: 'human',
+        rationale: 'The cited table reports the other arm.',
+        openedAt: T0,
+      });
+      await store.openDispute({
+        version: ref,
+        openedByRef: 'user:3',
+        openedByKind: 'human',
+        openedAt: T1,
+      });
+      equal(
+        (await store.disputes(ref)).map((d) => d.rationale),
+        ['The cited table reports the other arm.', null],
+        'dispute rationale, oldest first',
+      );
+    },
+  },
+  {
+    name: 'disputes are scoped to the version they object to',
+    async run(h) {
+      const { store, seed } = h;
+      // The same property as for assessments, and for the same reason: a
+      // revision that answers an objection must not inherit it.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const first = await seed.version({ proposalId });
+      const second = await seed.version({ proposalId });
+      await store.openDispute({
+        version: first.ref,
+        openedByRef: 'user:2',
+        openedByKind: 'human',
+        openedAt: T0,
+      });
+      equal((await store.disputes(second.ref)).length, 0, 'disputes leaking onto a later version');
+      equal((await store.disputes(first.ref)).length, 1, 'disputes on the version they object to');
+    },
+  },
+  {
+    name: 'an assessment or a dispute on an unknown version is refused',
+    async run(h) {
+      const { store, seed } = h;
+      // Accepted, it is a verdict on nothing — and if the id is later issued
+      // to a real version, a verdict that version never received.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const ghost = { proposalId, versionId: UNKNOWN };
+      await refuses(
+        () =>
+          store.recordAssessment({
+            version: ghost,
+            assessorRef: 'user:2',
+            assessorKind: 'human',
+            verdict: 'approve',
+            recordedAt: T0,
+          }),
+        'an assessment on an unknown version',
+      );
+      await refuses(
+        () =>
+          store.openDispute({
+            version: ghost,
+            openedByRef: 'user:2',
+            openedByKind: 'human',
+            openedAt: T0,
+          }),
+        'a dispute on an unknown version',
+      );
+    },
+  },
+  {
+    name: 'a ruling on an unknown dispute is refused',
+    async run(h) {
+      await refuses(
+        () =>
+          h.store.ruleDispute({
+            disputeId: UNKNOWN,
+            ruling: 'rejected',
+            ruledByRef: 'user:3',
+            ruledAt: T0,
+          }),
+        'a ruling on an unknown dispute',
+      );
+    },
+  },
+  {
+    name: 'listOpenProposals with no limit lists every open proposal',
+    async run(h) {
+      const { store, seed } = h;
+      // An omitted limit means all of them. A store that quietly applies a
+      // default page size makes `candidatesFromStore` report a space as
+      // finished when it was only cut off.
+      const count = 60;
+      for (let i = 0; i < count; i += 1) {
+        await seed.proposal({
+          target: target(h, `n${i}`),
+          author: human('user:1'),
+          createdAt: `2020-01-01T00:${pad2(Math.floor(i / 60))}:${pad2(i % 60)}.000Z`,
+        });
+      }
+      equal((await store.listOpenProposals(h.space)).length, count, 'open proposals');
+    },
+  },
+  {
+    name: 'a decision keeps its explanation',
+    async run(h) {
+      const { store, seed } = h;
+      // A decision record that says only "held" cannot be understood once
+      // the inputs it was taken over are gone, which is the one time anyone
+      // reads it.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const { ref } = await seed.version({ proposalId });
+      await store.recordDecision({
+        version: ref,
+        policyId: 'p',
+        policyVersion: '1',
+        policyFingerprint: 'pf',
+        allowed: false,
+        inputFingerprint: 'f',
+        mode: 'shadow',
+        matchedRuleIds: ['base', 'high-risk'],
+        unmet: [
+          { requirementId: 'r.one', ruleId: 'base', detail: '0 of 2' },
+          { requirementId: 'r.two', ruleId: null, detail: null },
+        ],
+        evaluatedAt: T0,
+      });
+      const stored = await store.latestDecision(ref);
+      truthy(stored, 'latestDecision returned null');
+      equal(stored!.policyFingerprint, 'pf', 'policy fingerprint');
+      equal(stored!.matchedRuleIds, ['base', 'high-risk'], 'matched rules, in order');
+      equal(
+        stored!.unmet,
+        [
+          { requirementId: 'r.one', ruleId: 'base', detail: '0 of 2' },
+          { requirementId: 'r.two', ruleId: null, detail: null },
+        ],
+        'unmet requirements, in order',
+      );
+    },
+  },
+  {
+    name: 'latestDecision can be narrowed to the binding decision',
+    async run(h) {
+      const { store, seed } = h;
+      // A shadow evaluation recorded after the binding one is newer; asked
+      // for the decision that bound the version, a store must not offer it.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const { ref } = await seed.version({ proposalId });
+      await store.recordDecision({
+        version: ref,
+        policyId: 'p',
+        policyVersion: '1',
+        allowed: true,
+        inputFingerprint: 'f1',
+        mode: 'authoritative',
+        evaluatedAt: T0,
+      });
+      await store.recordDecision({
+        version: ref,
+        policyId: 'p',
+        policyVersion: '2',
+        allowed: false,
+        inputFingerprint: 'f2',
+        mode: 'shadow',
+        evaluatedAt: T1,
+      });
+      equal((await store.latestDecision(ref))?.mode, 'shadow', 'latest in either mode');
+      const binding = await store.latestDecision(ref, { mode: 'authoritative' });
+      equal(binding?.inputFingerprint, 'f1', 'latest authoritative decision');
+      equal(
+        (await store.latestDecision(ref, { mode: 'shadow' }))?.inputFingerprint,
+        'f2',
+        'latest shadow decision',
+      );
+      equal(binding?.matchedRuleIds, [], 'a decision recorded without a breakdown has an empty one');
     },
   },
   {

@@ -16,9 +16,14 @@
 import { atLeastRisk, isRiskLevel, type RiskLevel, type RiskProfile } from './risk.js';
 import type { ActorKind, ActorSnapshot } from './actors.js';
 import type { AssuranceProfile, ReviewerPoolState } from './assurance.js';
-import { fingerprintPolicyContext, type PolicyDecision } from './decisions.js';
+import {
+  fingerprint,
+  fingerprintPolicyContext,
+  type PolicyDecision,
+} from './decisions.js';
 import type { Requirement, RequirementOutcome } from './requirements.js';
 import type {
+  Fingerprint,
   PolicyId,
   PolicyRuleId,
   PolicyVersion,
@@ -76,6 +81,16 @@ export interface PolicySet {
   readonly id: PolicyId;
   readonly version: PolicyVersion;
   readonly rules: readonly PolicyRule[];
+  /**
+   * Fingerprint of what the policy requires: its id, version and `describe()`.
+   *
+   * The version string is a promise that a policy is not edited in place, and
+   * a promise is all it is. This makes the edit detectable: every decision
+   * carries it, so two decisions naming `v1` with different fingerprints were
+   * made under two different rules, whatever the label says. A host that
+   * stores one per version can refuse to start on a mismatch.
+   */
+  readonly definitionFingerprint: Fingerprint;
   readonly evaluate: (context: PolicyContext) => PolicyDecision;
   /** Serialisable description of every rule, for decision records and docs. */
   readonly describe: () => ReadonlyArray<{
@@ -173,6 +188,35 @@ function normalizeMatcher(matcher: RuleMatcher | undefined): RuleMatcher | null 
   return freezeMatcher(matcher);
 }
 
+/**
+ * A frozen copy of a requirement, taken when the rule is registered.
+ *
+ * Copying the array is not enough: the policy would still hold the caller's
+ * objects, and a caller that kept one could replace its `evaluate` after
+ * `build()`. The policy would then decide differently while every decision
+ * still carried the `definitionFingerprint` computed from the old behaviour —
+ * two gates under one name, which is the thing the fingerprint exists to rule
+ * out. The functions are captured here, so later assignments to the caller's
+ * object reach nothing the policy holds.
+ */
+function snapshotRequirement(requirement: Requirement): Requirement {
+  const { id, describe, evaluate } = requirement;
+  return Object.freeze({
+    id,
+    params: deepFreeze(JSON.parse(JSON.stringify(requirement.params ?? {})) as Record<string, unknown>),
+    describe,
+    evaluate,
+  });
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object') {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export interface RuleSpec {
   readonly id: PolicyRuleId;
   /** Omit for a rule that always applies. */
@@ -209,7 +253,7 @@ export function policy(id: PolicyId, version: PolicyVersion): PolicyBuilder {
   const assertUniqueId = (ruleId: PolicyRuleId) => {
     if (rules.some((r) => r.id === ruleId)) {
       throw new Error(
-        `knowledge-governance: duplicate rule id '${ruleId}' in policy '${id}'`,
+        `assurance-core: duplicate rule id '${ruleId}' in policy '${id}'`,
       );
     }
   };
@@ -220,7 +264,7 @@ export function policy(id: PolicyId, version: PolicyVersion): PolicyBuilder {
       rules.push({
         id: spec.id,
         when: normalizeMatcher(spec.when),
-        requirements: Object.freeze([...spec.require]),
+        requirements: Object.freeze(spec.require.map(snapshotRequirement)),
         isFallback: false,
       });
       return builder;
@@ -230,7 +274,7 @@ export function policy(id: PolicyId, version: PolicyVersion): PolicyBuilder {
       rules.push({
         id: spec.id,
         when: null,
-        requirements: Object.freeze([...spec.require]),
+        requirements: Object.freeze(spec.require.map(snapshotRequirement)),
         isFallback: true,
       });
       return builder;
@@ -247,22 +291,26 @@ export function policy(id: PolicyId, version: PolicyVersion): PolicyBuilder {
       const frozen: readonly PolicyRule[] = Object.freeze(
         rules.map((r) => Object.freeze(r)),
       );
+      const describe = () =>
+        frozen.map((r) => ({
+          ruleId: r.id,
+          when: r.when,
+          isFallback: r.isFallback,
+          requirements: r.requirements.map((req) => ({
+            id: req.id,
+            description: req.describe(),
+            params: { ...req.params },
+          })),
+        }));
+      const definitionFingerprint = fingerprint({ id, version, rules: describe() });
       return Object.freeze({
         id,
         version,
         rules: frozen,
-        evaluate: (context: PolicyContext) => evaluatePolicy(id, version, frozen, context),
-        describe: () =>
-          frozen.map((r) => ({
-            ruleId: r.id,
-            when: r.when,
-            isFallback: r.isFallback,
-            requirements: r.requirements.map((req) => ({
-              id: req.id,
-              description: req.describe(),
-              params: { ...req.params },
-            })),
-          })),
+        definitionFingerprint,
+        evaluate: (context: PolicyContext) =>
+          evaluatePolicy(id, version, definitionFingerprint, frozen, context),
+        describe,
       });
     },
   };
@@ -288,6 +336,7 @@ export function policy(id: PolicyId, version: PolicyVersion): PolicyBuilder {
 function evaluatePolicy(
   id: PolicyId,
   version: PolicyVersion,
+  policyFingerprint: Fingerprint,
   rules: readonly PolicyRule[],
   context: PolicyContext,
 ): PolicyDecision {
@@ -323,6 +372,7 @@ function evaluatePolicy(
     allowed: unmet.length === 0,
     policyId: id,
     policyVersion: version,
+    policyFingerprint,
     inputFingerprint: fingerprintPolicyContext(context),
     matchedRuleIds: applicable.map((r) => r.id),
     outcomes,

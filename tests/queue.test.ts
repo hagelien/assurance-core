@@ -1073,3 +1073,39 @@ describe('candidatesFromStore — limit counts candidates, not rows read', () =>
     expect(await candidatesFromStore(store, 's', { limit: 5 })).toHaveLength(1);
   });
 });
+
+describe('filterEligible — a reviewer with a stake in the outcome', () => {
+  it('drops a row the host marked as conflicted for this reviewer', () => {
+    const c = candidate('a', { conflictedRefs: ['user:9'] });
+    const { eligible, excluded } = filterEligible({
+      candidates: [c],
+      reviewerRef: 'user:9',
+      judged: new Set(),
+    });
+    expect(eligible).toEqual([]);
+    expect(excluded[0]!.reason).toBe('conflicted');
+  });
+
+  it('serves it to everyone else', () => {
+    const c = candidate('a', { conflictedRefs: ['user:9'] });
+    const { eligible } = filterEligible({
+      candidates: [c],
+      reviewerRef: 'user:8',
+      judged: new Set(),
+    });
+    expect(eligible).toEqual([c]);
+  });
+
+  it('is not lifted by a self-review grant', () => {
+    // The grant is for a pool too small to review without its authors, not
+    // for reviewers with an interest in the outcome.
+    const c = candidate('a', { conflictedRefs: ['user:9'] });
+    const { excluded } = filterEligible({
+      candidates: [c],
+      reviewerRef: 'user:9',
+      selfReviewEnabled: true,
+      judged: new Set(),
+    });
+    expect(excluded[0]!.reason).toBe('conflicted');
+  });
+});

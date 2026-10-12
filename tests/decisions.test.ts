@@ -139,7 +139,7 @@ describe('fingerprintPolicyContext', () => {
     ['risk', makeContext({ risk: riskProfile('high') })],
     ['pool', makeContext({ pool: DEGRADED_POOL })],
     ['assurance', makeContext({ assurance: { independentApprovers: 1 } })],
-    ['targetType', makeContext({ targetType: 'wiki_fact' })],
+    ['targetType', makeContext({ targetType: 'note' })],
     ['proposalVersionId', makeContext({ proposalVersionId: 'pe:2' })],
     ['flags', makeContext({ flags: ['shadow'] })],
   ])('changes when %s changes', (_field, changed) => {

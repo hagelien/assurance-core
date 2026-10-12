@@ -53,11 +53,23 @@ export interface ReviewCandidate {
   readonly authorRef: string | null;
   /** False for a row this host must never show a reviewer. */
   readonly visible: boolean;
+  /**
+   * Actors who may not review this row although they did not author it — a
+   * reviewer with a stake in the outcome. Who has a stake is the host's call
+   * (a sponsor of the author, a party to a dispute on it, a co-author); the
+   * core only refuses to serve it to them.
+   *
+   * Unlike `authorRef`, a self-review grant does not lift this: the grant
+   * exists for a pool too small to review without its authors, not for
+   * reviewers with an interest in the outcome.
+   */
+  readonly conflictedRefs?: readonly string[];
 }
 
 export type ExclusionReason =
   | 'not_visible'
   | 'authored_by_caller'
+  | 'conflicted'
   | 'already_judged';
 
 export interface EligibilityResult {
@@ -124,6 +136,10 @@ export function filterEligible(args: {
       candidate.authorRef === args.reviewerRef
     ) {
       excluded.push({ candidate, reason: 'authored_by_caller' });
+      continue;
+    }
+    if (candidate.conflictedRefs?.includes(args.reviewerRef)) {
+      excluded.push({ candidate, reason: 'conflicted' });
       continue;
     }
     if (args.judged.has(formatVersionRef(candidate.version))) {

@@ -49,6 +49,7 @@ export const REQUIREMENT_IDS = {
   independentApprovalsFromPool: 'assurance.independentApprovals.pool',
   noDisputingAssessments: 'assurance.noDisputingAssessments',
   noOpenDisputes: 'disputes.none',
+  noUpheldDisputes: 'disputes.noneUpheld',
   approvalWithCapability: 'assurance.approvalWithCapability',
   humanApproval: 'assurance.humanApproval',
   humanApprovalWithCapability: 'assurance.humanApprovalWithCapability',
@@ -147,6 +148,9 @@ export function noDisputingAssessments(): Requirement {
  * record is a formal objection with its own lifecycle (open → upheld /
  * rejected / withdrawn) that anyone may raise, including someone who never
  * cast an assessment.
+ *
+ * Open only: an upheld dispute is closed, so this stops holding once the
+ * objection is found correct. Pair it with `noUpheldDisputes`.
  */
 export function noOpenDisputes(): Requirement {
   return requirement({
@@ -156,6 +160,31 @@ export function noOpenDisputes(): Requirement {
     check: (context) => ({
       met: context.assurance.disputesOpen === 0,
       detail: `${context.assurance.disputesOpen} open dispute(s)`,
+    }),
+  });
+}
+
+/**
+ * No dispute record was settled in the objector's favour.
+ *
+ * The companion to `noOpenDisputes`, and a policy that has one almost always
+ * wants both: `noOpenDisputes` holds a version while an objection is being
+ * heard, and stops holding it the moment any ruling closes the objection —
+ * including the ruling that it was right. This is what keeps holding after
+ * that. Read together they say "nobody is objecting, and nobody objected
+ * correctly".
+ *
+ * A host that answers an upheld objection by revising the change records a
+ * new version; disputes are per version, so the revision starts clean.
+ */
+export function noUpheldDisputes(): Requirement {
+  return requirement({
+    id: REQUIREMENT_IDS.noUpheldDisputes,
+    params: {},
+    description: 'no dispute was upheld',
+    check: (context) => ({
+      met: context.assurance.disputesUpheld === 0,
+      detail: `${context.assurance.disputesUpheld} upheld dispute(s)`,
     }),
   });
 }

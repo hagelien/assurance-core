@@ -57,6 +57,13 @@ export interface ReviewableVersion {
 
 export interface ReviewPacket {
   readonly target: TargetRef;
+  /** The version under review — both halves, as `formatVersionRef` insists. */
+  readonly proposalVersion: ProposalVersionRef;
+  /**
+   * `proposalVersion.versionId`, kept for packets read by code written before
+   * the whole reference travelled. A version id is unique only within its
+   * proposal in some hosts, so new code reads `proposalVersion`.
+   */
   readonly proposalVersionId: string;
   readonly targetVersion: string;
   readonly createdAt: string;
@@ -103,27 +110,18 @@ const PEER_SIGNAL_STEMS: readonly string[] = [
 ];
 
 /**
- * Exact keys that trip a stem but are the object's own content rather than a
- * peer's judgment.
+ * Exact keys that trip a stem but are this module's own vocabulary.
  *
- * The clearest case is a domain where the thing under review is itself a
- * review: its payload legitimately carries a written assessment and a
- * confidence, those are the author's own submission, and withholding them
- * would leave nothing to review.
- *
- * Matched exactly, not by stem: an escape hatch that also matched substrings
- * would let `approvalCountsSummary` through by way of `approvals`. Adding to
- * this list should always be a deliberate act about one named field.
+ * A host whose content legitimately carries such a key passes it to
+ * `sealReviewPacket` as `allowKeys` — see there. The list here is only what
+ * every host needs, so that no host's field names live in the core.
  */
-const ALLOWED_KEYS: ReadonlySet<string> = new Set([
-  'reviewmarkdown',
-  'reviewconfidence',
-  'readinfull',
-  'readinfullunverified',
-  'overallscore',
-  'conclusionsupport',
-  'evidencerequirements',
-]);
+const CORE_ALLOWED_KEYS: readonly string[] = ['evidencerequirements'];
+
+/** The form keys are compared in: lower-case letters only. */
+function normaliseKey(key: string): string {
+  return key.toLowerCase().replace(/[^a-z]/g, '');
+}
 
 export class ReviewPacketLeakError extends Error {
   constructor(readonly path: string) {
@@ -139,6 +137,7 @@ function assertNoPeerSignals(
   value: unknown,
   path: string,
   seen: Set<object>,
+  allowed: ReadonlySet<string>,
 ): void {
   if (value === null || typeof value !== 'object') return;
   // Adapters hydrate from stored rows and re-use nested objects across items;
@@ -148,18 +147,20 @@ function assertNoPeerSignals(
   seen.add(value as object);
 
   if (Array.isArray(value)) {
-    value.forEach((item, i) => assertNoPeerSignals(item, `${path}[${i}]`, seen));
+    value.forEach((item, i) =>
+      assertNoPeerSignals(item, `${path}[${i}]`, seen, allowed),
+    );
     return;
   }
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    const normalised = key.toLowerCase().replace(/[^a-z]/g, '');
+    const normalised = normaliseKey(key);
     if (
-      !ALLOWED_KEYS.has(normalised) &&
+      !allowed.has(normalised) &&
       PEER_SIGNAL_STEMS.some((stem) => normalised.includes(stem))
     ) {
       throw new ReviewPacketLeakError(`${path}.${key}`);
     }
-    assertNoPeerSignals(child, `${path}.${key}`, seen);
+    assertNoPeerSignals(child, `${path}.${key}`, seen, allowed);
   }
 }
 
@@ -177,20 +178,46 @@ export function sealReviewPacket(args: {
   evidence?: readonly ReviewEvidenceRef[];
   evidenceRequirements?: readonly EvidenceRequirement[];
   context?: Record<string, unknown>;
+  /**
+   * Keys that trip a peer-signal stem but are the object's own content rather
+   * than a peer's judgment, matched exactly after normalising (lower case,
+   * letters only).
+   *
+   * The clearest case is a domain where the thing under review is itself a
+   * review: its payload legitimately carries a written assessment and a
+   * confidence, those are the author's own submission, and withholding them
+   * would leave nothing to review. They apply to `proposed` and `current`
+   * only — the content under review — and never to `evidence` or `context`.
+   * Exact, not by stem: an escape hatch that
+   * matched substrings would let `approvalCountsSummary` through by way of
+   * `approvals`. Each entry should be a deliberate act about one named field.
+   */
+  allowKeys?: readonly string[];
 }): ReviewPacket {
   const proposed = args.proposed;
   const current = args.current ?? {};
   const evidence = args.evidence ?? [];
   const context = args.context ?? {};
+  const allowed: ReadonlySet<string> = new Set([
+    ...CORE_ALLOWED_KEYS,
+    ...(args.allowKeys ?? []).map(normaliseKey),
+  ]);
 
+  // A host's allowances reach only the content under review — what is
+  // proposed and the baseline it is compared with. Evidence and context are
+  // never the object's own content, so they are held to the core list alone:
+  // allowing a field because it is legitimate in a proposal must not let the
+  // same name carry another reviewer's judgment in through the context.
+  const strict: ReadonlySet<string> = new Set(CORE_ALLOWED_KEYS);
   const seen = new Set<object>();
-  assertNoPeerSignals(proposed, 'proposed', seen);
-  assertNoPeerSignals(current, 'current', seen);
-  assertNoPeerSignals(evidence, 'evidence', seen);
-  assertNoPeerSignals(context, 'context', seen);
+  assertNoPeerSignals(proposed, 'proposed', seen, allowed);
+  assertNoPeerSignals(current, 'current', seen, allowed);
+  assertNoPeerSignals(evidence, 'evidence', seen, strict);
+  assertNoPeerSignals(context, 'context', seen, strict);
 
   return Object.freeze({
     target: args.version.target,
+    proposalVersion: args.version.ref,
     proposalVersionId: args.version.ref.versionId,
     targetVersion: args.version.targetVersion,
     createdAt: args.version.createdAt,

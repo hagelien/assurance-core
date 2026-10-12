@@ -57,6 +57,12 @@ export interface DisputeState {
   readonly openedByRef: string;
   readonly openedByKind: ActorKind;
   readonly open: boolean;
+  /**
+   * Settled in the objector's favour. A closed dispute can still be upheld,
+   * and then it still says the version is wrong — see `noUpheldDisputes`.
+   * Absent reads as false.
+   */
+  readonly upheld?: boolean;
 }
 
 /**
@@ -87,6 +93,11 @@ export interface AssuranceProfile {
   readonly disputingAssessors: number;
   /** Open dispute records (a separate mechanism from a `dispute` verdict). */
   readonly disputesOpen: number;
+  /**
+   * Dispute records settled in the objector's favour. Not a subset of
+   * `disputesOpen`: an upheld dispute is closed, and is counted here instead.
+   */
+  readonly disputesUpheld: number;
   /** Distinct assessors with an explicit `abstain`. */
   readonly abstentions: number;
   /** The author's own submit-time stake, if recorded. Never counts toward quorum. */
@@ -103,6 +114,7 @@ export const EMPTY_ASSURANCE_PROFILE: AssuranceProfile = Object.freeze({
   humanApprovalCapabilities: Object.freeze([]) as readonly string[],
   disputingAssessors: 0,
   disputesOpen: 0,
+  disputesUpheld: 0,
   abstentions: 0,
   implicitApprovals: 0,
   evidenceRequirementState: Object.freeze([]) as readonly EvidenceRequirementState[],
@@ -191,6 +203,7 @@ export function tallyAssurance(
     humanApprovalCapabilities: [...humanApprovalCapabilities].sort(),
     disputingAssessors,
     disputesOpen: (options.disputes ?? []).filter((d) => d.open).length,
+    disputesUpheld: (options.disputes ?? []).filter((d) => d.upheld === true).length,
     abstentions,
     implicitApprovals,
     evidenceRequirementState: [...(options.evidenceRequirementState ?? [])],

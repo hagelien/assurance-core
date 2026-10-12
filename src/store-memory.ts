@@ -37,6 +37,7 @@ import type {
 import { formatTargetRef } from './types.js';
 import type {
   AssuranceStore,
+  DecisionQuery,
   OpenDisputeInput,
   OpenProposalQuery,
   RecordAssessmentInput,
@@ -50,7 +51,12 @@ import type {
   StoredProposalVersion,
   Timestamp,
 } from './store.js';
-import { formatVersionRef, rulingClosesDispute, sameVersion } from './store.js';
+import {
+  disputeIsUpheld,
+  formatVersionRef,
+  rulingClosesDispute,
+  sameVersion,
+} from './store.js';
 
 export interface SeedProposalInput {
   /**
@@ -260,6 +266,7 @@ export class MemoryAssuranceStore implements AssuranceStore {
     return this.disputeRecords.filter((d) => sameVersion(d.version, ref));
   }
 
+
   async disputeRulings(disputeId: string): Promise<readonly StoredDisputeRuling[]> {
     return this.rulings.filter((r) => r.disputeId === disputeId);
   }
@@ -270,8 +277,15 @@ export class MemoryAssuranceStore implements AssuranceStore {
     return this.evidence.get(formatVersionRef(ref)) ?? [];
   }
 
-  async latestDecision(ref: ProposalVersionRef): Promise<StoredDecision | null> {
-    const matches = this.decisions.filter((d) => sameVersion(d.version, ref));
+  async latestDecision(
+    ref: ProposalVersionRef,
+    query: DecisionQuery = {},
+  ): Promise<StoredDecision | null> {
+    const matches = this.decisions.filter(
+      (d) =>
+        sameVersion(d.version, ref) &&
+        (query.mode === undefined || d.mode === query.mode),
+    );
     return matches[matches.length - 1] ?? null;
   }
 
@@ -301,12 +315,17 @@ export class MemoryAssuranceStore implements AssuranceStore {
   }
 
   async openDispute(input: OpenDisputeInput): Promise<StoredDispute> {
+    if (!this.versions.has(formatVersionRef(input.version))) {
+      throw new Error(`openDispute: no version ${formatVersionRef(input.version)}`);
+    }
     const record: StoredDispute = {
       disputeId: this.nextId('dispute'),
       version: input.version,
       openedByRef: input.openedByRef,
       openedByKind: input.openedByKind,
       open: true,
+      upheld: false,
+      rationale: input.rationale ?? null,
       openedAt: input.openedAt,
     };
     this.disputeRecords.push(record);
@@ -332,10 +351,13 @@ export class MemoryAssuranceStore implements AssuranceStore {
     // that does not close — a replacement dispute governs, and the objection
     // is neither settled nor abandoned.
     const existing = this.disputeRecords[index]!;
-    const closed = this.rulings
-      .filter((r) => r.disputeId === input.disputeId)
-      .some((r) => rulingClosesDispute(r.ruling));
-    this.disputeRecords[index] = { ...existing, open: !closed };
+    const rulings = this.rulings.filter((r) => r.disputeId === input.disputeId);
+    const closed = rulings.some((r) => rulingClosesDispute(r.ruling));
+    this.disputeRecords[index] = {
+      ...existing,
+      open: !closed,
+      upheld: disputeIsUpheld(rulings),
+    };
     return record;
   }
 
@@ -345,9 +367,12 @@ export class MemoryAssuranceStore implements AssuranceStore {
       version: input.version,
       policyId: input.policyId,
       policyVersion: input.policyVersion,
+      policyFingerprint: input.policyFingerprint ?? null,
       allowed: input.allowed,
       inputFingerprint: input.inputFingerprint,
       mode: input.mode,
+      matchedRuleIds: [...(input.matchedRuleIds ?? [])],
+      unmet: (input.unmet ?? []).map((u) => ({ ...u })),
       evaluatedAt: input.evaluatedAt,
     };
     this.decisions.push(record);

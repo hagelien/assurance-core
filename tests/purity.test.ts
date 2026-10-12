@@ -41,6 +41,14 @@ function sourceFiles(dir: string): string[] {
 
 const FILES = sourceFiles(SRC);
 
+/** Every identifier that reaches a clock or a source of entropy. */
+const CLOCK_OR_ENTROPY = /\bDate\b|\bperformance\b|\bcrypto\b|Math\.random|\bprocess\b/;
+
+/** Source with block and line comments removed — approximate, and enough here. */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
 /** Report offenders by path, so a failure names the file rather than a count. */
 function offenders(predicate: (text: string, file: string) => boolean): string[] {
   return FILES.filter((file) =>
@@ -95,6 +103,32 @@ describe('zero runtime dependencies', () => {
       ),
     );
     expect(bad).toEqual([]);
+  });
+
+  it('names no clock or entropy source anywhere in its code', () => {
+    // The check above looks for the usual spellings, and the usual spellings
+    // are not the only ones: `Date()` without `new` returns the current time
+    // as a string, and `Reflect.construct(Date, [])` builds one without the
+    // word `new`. Both type-check under the build config, which still carries
+    // `Date` in its standard library. So the code — comments stripped, since
+    // prose may describe the timestamp format — names none of them at all.
+    const bad = offenders((text) => CLOCK_OR_ENTROPY.test(stripComments(text)));
+    expect(bad).toEqual([]);
+  });
+
+  it('would catch the spellings that slipped past the first check', () => {
+    for (const leak of [
+      'const now = Date();',
+      'const now = Reflect.construct(Date, []);',
+      'const D = globalThis.Date; D.now();',
+      'performance.now()',
+      'crypto.getRandomValues(buf)',
+    ]) {
+      expect(CLOCK_OR_ENTROPY.test(stripComments(leak))).toBe(true);
+    }
+    expect(CLOCK_OR_ENTROPY.test(stripComments('// `Date.prototype.toISOString`'))).toBe(
+      false,
+    );
   });
 });
 
