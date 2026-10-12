@@ -151,6 +151,22 @@ describe('a policy definition', () => {
     );
   });
 
+  it('cannot be changed after it is built through a requirement the caller kept', () => {
+    // A caller holding the requirement object it passed in must not be able
+    // to change what the built policy does while the fingerprint stays put.
+    const kept = { ...independentApprovals(2) } as { -readonly [K in keyof ReturnType<typeof independentApprovals>]: ReturnType<typeof independentApprovals>[K] };
+    const p = policy('p', '1').rule({ id: 'base', require: [kept] }).build();
+    const before = p.evaluate(makeContext());
+    const fingerprint = p.definitionFingerprint;
+    kept.evaluate = () => ({ ...before.outcomes[0]!, met: true, requirementId: kept.id, description: 'forged' });
+    kept.params = { count: 0 };
+    const after = p.evaluate(makeContext());
+    expect(after.allowed).toBe(before.allowed);
+    expect(after.outcomes).toEqual(before.outcomes);
+    expect(p.definitionFingerprint).toBe(fingerprint);
+    expect(p.describe()[0]!.requirements[0]!.params).toEqual({ count: 2 });
+  });
+
   it('is named by every decision taken under it', () => {
     const p = build(2);
     expect(p.evaluate(makeContext()).policyFingerprint).toBe(p.definitionFingerprint);

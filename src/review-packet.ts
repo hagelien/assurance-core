@@ -186,7 +186,9 @@ export function sealReviewPacket(args: {
    * The clearest case is a domain where the thing under review is itself a
    * review: its payload legitimately carries a written assessment and a
    * confidence, those are the author's own submission, and withholding them
-   * would leave nothing to review. Exact, not by stem: an escape hatch that
+   * would leave nothing to review. They apply to `proposed` and `current`
+   * only — the content under review — and never to `evidence` or `context`.
+   * Exact, not by stem: an escape hatch that
    * matched substrings would let `approvalCountsSummary` through by way of
    * `approvals`. Each entry should be a deliberate act about one named field.
    */
@@ -201,11 +203,17 @@ export function sealReviewPacket(args: {
     ...(args.allowKeys ?? []).map(normaliseKey),
   ]);
 
+  // A host's allowances reach only the content under review — what is
+  // proposed and the baseline it is compared with. Evidence and context are
+  // never the object's own content, so they are held to the core list alone:
+  // allowing a field because it is legitimate in a proposal must not let the
+  // same name carry another reviewer's judgment in through the context.
+  const strict: ReadonlySet<string> = new Set(CORE_ALLOWED_KEYS);
   const seen = new Set<object>();
   assertNoPeerSignals(proposed, 'proposed', seen, allowed);
   assertNoPeerSignals(current, 'current', seen, allowed);
-  assertNoPeerSignals(evidence, 'evidence', seen, allowed);
-  assertNoPeerSignals(context, 'context', seen, allowed);
+  assertNoPeerSignals(evidence, 'evidence', seen, strict);
+  assertNoPeerSignals(context, 'context', seen, strict);
 
   return Object.freeze({
     target: args.version.target,

@@ -146,6 +146,35 @@ describe('a host may allow keys that are the object under review, not a peer sig
     ).toThrow(ReviewPacketLeakError);
   });
 
+  it('reaches only the content under review, never the context or the evidence', () => {
+    // Allowed because it is legitimate in a proposal; the same name in the
+    // context is another reviewer's judgment arriving by the side door.
+    expect(() =>
+      sealReviewPacket({
+        version,
+        proposed: {},
+        context: { verdictSummary: 'two approve' },
+        allowKeys: ['verdictSummary'],
+      }),
+    ).toThrow(ReviewPacketLeakError);
+    expect(() =>
+      sealReviewPacket({
+        version,
+        proposed: {},
+        evidence: [{ kind: 'note', id: 'e1', summary: { verdictSummary: 'upheld' } }],
+        allowKeys: ['verdictSummary'],
+      }),
+    ).toThrow(ReviewPacketLeakError);
+    expect(
+      sealReviewPacket({
+        version,
+        proposed: { verdictSummary: 'new text' },
+        current: { verdictSummary: 'old text' },
+        allowKeys: ['verdictSummary'],
+      }).current.verdictSummary,
+    ).toBe('old text');
+  });
+
   it('allows no host field by default', () => {
     // The core once carried one host's field names here. Every host's own
     // content keys are its own to declare.

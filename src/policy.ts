@@ -188,6 +188,35 @@ function normalizeMatcher(matcher: RuleMatcher | undefined): RuleMatcher | null 
   return freezeMatcher(matcher);
 }
 
+/**
+ * A frozen copy of a requirement, taken when the rule is registered.
+ *
+ * Copying the array is not enough: the policy would still hold the caller's
+ * objects, and a caller that kept one could replace its `evaluate` after
+ * `build()`. The policy would then decide differently while every decision
+ * still carried the `definitionFingerprint` computed from the old behaviour —
+ * two gates under one name, which is the thing the fingerprint exists to rule
+ * out. The functions are captured here, so later assignments to the caller's
+ * object reach nothing the policy holds.
+ */
+function snapshotRequirement(requirement: Requirement): Requirement {
+  const { id, describe, evaluate } = requirement;
+  return Object.freeze({
+    id,
+    params: deepFreeze(JSON.parse(JSON.stringify(requirement.params ?? {})) as Record<string, unknown>),
+    describe,
+    evaluate,
+  });
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object') {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export interface RuleSpec {
   readonly id: PolicyRuleId;
   /** Omit for a rule that always applies. */
@@ -235,7 +264,7 @@ export function policy(id: PolicyId, version: PolicyVersion): PolicyBuilder {
       rules.push({
         id: spec.id,
         when: normalizeMatcher(spec.when),
-        requirements: Object.freeze([...spec.require]),
+        requirements: Object.freeze(spec.require.map(snapshotRequirement)),
         isFallback: false,
       });
       return builder;
@@ -245,7 +274,7 @@ export function policy(id: PolicyId, version: PolicyVersion): PolicyBuilder {
       rules.push({
         id: spec.id,
         when: null,
-        requirements: Object.freeze([...spec.require]),
+        requirements: Object.freeze(spec.require.map(snapshotRequirement)),
         isFallback: true,
       });
       return builder;
