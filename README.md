@@ -171,7 +171,7 @@ question; *whose*, and of what kind, usually is.
 | `Assessment` | One reviewer's verdict on one proposal version: `approve`, `dispute`, `abstain`. |
 | `AssuranceProfile` | What a version has actually accumulated: counts, composition, capabilities. Built by `tallyAssurance`. |
 | `RiskProfile` | The host's classification: a level plus free-form tags. The core never computes this. |
-| `Requirement` | A composable, self-explaining predicate: `independentApprovals(2)`, `humanApproval()`, ... |
+| `Requirement` | A composable, self-explaining predicate: `independentApprovals(2)`, `humanApproval()`, `independentHumanApproval()`, ... |
 | `PolicySet` | Versioned rules. Built with `policy(id, version)`, evaluated against a `PolicyContext`. Carries a `definitionFingerprint` of what it requires. |
 | `PolicyDecision` | The auditable output: allowed or held, which rule, which requirements, and fingerprints of the inputs and of the policy definition. |
 | `StoredDecision` | A decision as the store keeps it, breakdown included. Build the input with `decisionRecord(decision, ...)`. |
@@ -184,6 +184,21 @@ be **server-owned**. That is a security boundary, not a naming convention: a
 value the caller could have chosen must never satisfy an assurance requirement.
 A model string an agent reports about itself is audit metadata; the tier your
 server recorded when the assessment was written may be an assurance capability.
+
+**A human approval vs an independent one.** A person who agreed with an
+agent's assessment they had already read and a person who judged with no answer
+in front of them have both approved, and they are different evidence. An
+`Assessment` can carry a **server-owned** `priorExposure`: `none` when your host
+served the reviewer no AI output about the proposal before the verdict,
+`ai_output` when it did, `unknown` when it cannot say. Set it from what you
+actually served, the way you set `assuranceCapabilities`, never from the
+reviewer's request. The tally splits `humanApprovals` into
+`humanApprovalsWithoutAiExposure`, `humanApprovalsAfterAiExposure` and
+`humanApprovalsWithUnknownExposure`, and `independentHumanApproval()` counts only
+the first. `unknown`, and an exposure nobody recorded, count as exposed, but are
+reported separately, so a held proposal says "1 made after viewing AI output" or
+"1 with unknown prior exposure" rather than just "held". Exposure only ever rises:
+a reviewer who re-records as `none` after seeing the AI's answer stays exposed.
 
 **Open vs upheld disputes.** Closing an objection and finding it correct are
 different facts. `noOpenDisputes()` holds a version while an objection is being
@@ -332,6 +347,18 @@ Upgrading an adapter to 0.5 means:
 
 The conformance suite checks all of these. A host that relied on the packet's
 built-in allow-list now passes those keys itself.
+
+Unreleased: **prior AI exposure.** `Assessment` and `RecordAssessmentInput`
+take an optional `priorExposure`, the profile gains the three exposure counts
+above, and `independentHumanApproval()` reads them. All of it is optional, so a
+host that records no exposure keeps working unchanged: its human approvals read
+as of unknown exposure, which satisfies `humanApproval()` as before and never
+satisfies `independentHumanApproval()`. Input fingerprints for such a host are
+unchanged. One conformance clause is new: a store must never hand back `none`
+for an assessor whose earlier assessment on the same version was exposed or of
+unknown exposure. It raises the exposure (`raisePriorExposure` does the
+arithmetic) or refuses the write. An adapter that does not store the field at all
+already conforms.
 
 Two hosts use it: the reference work it was extracted from, and the ADR log in
 `examples/`. The second is deliberately small, so "it fits two domains" is a

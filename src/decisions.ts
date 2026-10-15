@@ -130,6 +130,7 @@ export function fingerprintPolicyContext(context: PolicyContext): Fingerprint {
       // stored fingerprint disagree with a re-evaluation of the same facts —
       // that is exactly the signal the fingerprint exists to give.
       disputesUpheld: context.assurance.disputesUpheld || undefined,
+      ...exposureCounts(context.assurance),
       approvalCapabilities: canonicalSet(context.assurance.approvalCapabilities),
       humanApprovalCapabilities: canonicalSet(
         context.assurance.humanApprovalCapabilities,
@@ -138,6 +139,34 @@ export function fingerprintPolicyContext(context: PolicyContext): Fingerprint {
     pool: context.pool,
     flags: canonicalSet(context.flags),
   });
+}
+
+/**
+ * The prior-exposure counts as the fingerprint carries them, for the same
+ * reason `disputesUpheld` is dropped at zero: a context that predates them
+ * must fingerprint as it always did.
+ *
+ * That takes more than dropping zeros. Re-tallying the assessments behind an
+ * old decision reports every human approval as of unknown exposure, which is
+ * not zero. But `independentHumanApproval` reads the unknown count as at least
+ * whatever the other two leave of `humanApprovals`, so up to that point it is
+ * determined by fields already hashed, and only a hand-built profile claiming
+ * more than that carries it into the fingerprint.
+ */
+function exposureCounts(assurance: PolicyContext['assurance']): {
+  humanApprovalsWithoutAiExposure?: number;
+  humanApprovalsAfterAiExposure?: number;
+  humanApprovalsWithUnknownExposure?: number;
+} {
+  const unexposed = assurance.humanApprovalsWithoutAiExposure ?? 0;
+  const exposed = assurance.humanApprovalsAfterAiExposure ?? 0;
+  const unknown = assurance.humanApprovalsWithUnknownExposure ?? 0;
+  const implied = assurance.humanApprovals - unexposed - exposed;
+  return {
+    humanApprovalsWithoutAiExposure: unexposed || undefined,
+    humanApprovalsAfterAiExposure: exposed || undefined,
+    humanApprovalsWithUnknownExposure: unknown > implied ? unknown : undefined,
+  };
 }
 
 /** One-line summary of a decision, for logs. */

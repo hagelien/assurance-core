@@ -26,6 +26,7 @@
 
 import type { ActorSnapshot } from './actors.js';
 import type { EvidenceRequirementState } from './assurance.js';
+import { raisePriorExposure } from './assurance.js';
 import type { RiskProfile } from './risk.js';
 import { LOW_RISK } from './risk.js';
 import type {
@@ -297,6 +298,18 @@ export class MemoryAssuranceStore implements AssuranceStore {
         `recordAssessment: no version ${formatVersionRef(input.version)}`,
       );
     }
+    // Exposure only rises for one assessor on one version. Every earlier row
+    // counts, superseded ones included: a revision supersedes the verdict, not
+    // what the reviewer had already been shown.
+    let priorExposure = input.priorExposure;
+    for (const earlier of this.assessments) {
+      if (
+        earlier.assessorRef === input.assessorRef &&
+        sameVersion(earlier.version, input.version)
+      ) {
+        priorExposure = raisePriorExposure(priorExposure, earlier.priorExposure);
+      }
+    }
     const record: StoredAssessment = {
       assessmentId: this.nextId('assessment'),
       version: input.version,
@@ -309,6 +322,7 @@ export class MemoryAssuranceStore implements AssuranceStore {
       ...(input.assuranceCapabilities
         ? { assuranceCapabilities: [...input.assuranceCapabilities] }
         : {}),
+      ...(priorExposure !== undefined ? { priorExposure } : {}),
     };
     this.assessments.push(record);
     return record;

@@ -25,6 +25,68 @@ import type { ActorKind, ActorSnapshot } from './actors.js';
 export type AssessmentVerdict = 'approve' | 'dispute' | 'abstain';
 
 /**
+ * Whether the assessor had seen AI output about the proposal — an agent's
+ * assessment, a model-written summary, a suggested verdict — before recording
+ * their own verdict.
+ *
+ * "A human checked this without an answer in front of them" and "a human
+ * agreed with what an agent said" are different kinds of evidence, and a
+ * decision record should be able to tell them apart. Recognising a correct
+ * answer and finding a problem with no answer to start from are different
+ * skills.
+ *
+ *  - `none`: the host served the assessor nothing generated about this
+ *    proposal before the verdict was recorded.
+ *  - `ai_output`: the host served such output first.
+ *  - `unknown`: the host cannot say. An absent value means the same.
+ *
+ * Server-owned, like `assuranceCapabilities`: the host sets it from what it
+ * actually served the assessor, never from anything the assessor reports. For
+ * every requirement that reads it, `unknown` counts as exposed — the safe
+ * direction, since nothing proves it was not — but the profile keeps it apart
+ * from `ai_output` so a host can see how much it does not know.
+ */
+export type PriorExposure = 'none' | 'ai_output' | 'unknown';
+
+const PRIOR_EXPOSURE_RANK: Readonly<Record<PriorExposure, number>> = {
+  none: 0,
+  unknown: 1,
+  ai_output: 2,
+};
+
+/** An assessment's prior exposure, with an absent value read as `unknown`. */
+export function priorExposureOf(
+  assessment: Pick<Assessment, 'priorExposure'>,
+): PriorExposure {
+  return assessment.priorExposure ?? 'unknown';
+}
+
+/**
+ * The exposure to store on a new assessment, given one the same assessor
+ * already holds on the same version.
+ *
+ * Exposure only ever rises. A reviewer who has seen the AI's answer cannot
+ * unsee it by recording again, so a revision written as `none` after an
+ * earlier `ai_output` — or after an earlier assessment whose exposure nobody
+ * recorded — must not be stored as `none`, or re-recording becomes a way to
+ * launder an exposed judgment into an independent one. Ordered
+ * `none` < `unknown` < `ai_output`; an absent value ranks as `unknown`.
+ *
+ * Returns `recorded` unchanged, absent included, unless `earlier` ranks above
+ * it, so a host that never records exposure stores exactly what it stored
+ * before.
+ */
+export function raisePriorExposure(
+  recorded: PriorExposure | undefined,
+  earlier: PriorExposure | undefined,
+): PriorExposure | undefined {
+  const floor = earlier ?? 'unknown';
+  return PRIOR_EXPOSURE_RANK[floor] > PRIOR_EXPOSURE_RANK[recorded ?? 'unknown']
+    ? floor
+    : recorded;
+}
+
+/**
  * One recorded assessment. `implicit` marks the stake an author takes by
  * submitting — a host may record an implicit approval at submit time so the
  * author's position is on the record. It is evidence of authorship, not of
@@ -42,6 +104,13 @@ export interface Assessment {
    * revoked must not keep clearing a capability gate afterwards.
    */
   readonly assuranceCapabilities?: readonly string[];
+  /**
+   * Server-owned: whether the assessor had seen AI output about the proposal
+   * before recording this verdict. See `PriorExposure`. Absent reads as
+   * `unknown`, so a host that never sets it keeps working and simply never
+   * satisfies `independentHumanApproval()`.
+   */
+  readonly priorExposure?: PriorExposure;
 }
 
 /** Whether one evidence requirement the host declared is currently satisfied. */
@@ -89,6 +158,26 @@ export interface AssuranceProfile {
    * way.
    */
   readonly humanApprovalCapabilities: readonly string[];
+  /**
+   * Human approvals recorded with `priorExposure: 'none'`: a person who judged
+   * before seeing any AI output about the proposal. This is what
+   * `independentHumanApproval()` counts.
+   *
+   * The three exposure counts split `humanApprovals` and sum to it. They are
+   * optional only so a profile a host assembled by hand before they existed
+   * still type-checks; `tallyAssurance` always fills them in. Absent, the
+   * first two read as 0, and any human approval neither of them places reads
+   * as of unknown exposure.
+   */
+  readonly humanApprovalsWithoutAiExposure?: number;
+  /** Human approvals recorded with `priorExposure: 'ai_output'`. */
+  readonly humanApprovalsAfterAiExposure?: number;
+  /**
+   * Human approvals whose prior exposure is `unknown` or was never recorded.
+   * Counted as exposed by every requirement, and reported apart from
+   * `humanApprovalsAfterAiExposure` so a host can see what it does not know.
+   */
+  readonly humanApprovalsWithUnknownExposure?: number;
   /** Distinct assessors with an explicit `dispute` verdict. */
   readonly disputingAssessors: number;
   /** Open dispute records (a separate mechanism from a `dispute` verdict). */
@@ -112,6 +201,9 @@ export const EMPTY_ASSURANCE_PROFILE: AssuranceProfile = Object.freeze({
   agentApprovals: 0,
   approvalCapabilities: Object.freeze([]) as readonly string[],
   humanApprovalCapabilities: Object.freeze([]) as readonly string[],
+  humanApprovalsWithoutAiExposure: 0,
+  humanApprovalsAfterAiExposure: 0,
+  humanApprovalsWithUnknownExposure: 0,
   disputingAssessors: 0,
   disputesOpen: 0,
   disputesUpheld: 0,
@@ -162,6 +254,9 @@ export function tallyAssurance(
   let explicitApprovals = 0;
   let independentApprovers = 0;
   let humanApprovals = 0;
+  let humanApprovalsWithoutAiExposure = 0;
+  let humanApprovalsAfterAiExposure = 0;
+  let humanApprovalsWithUnknownExposure = 0;
   let agentApprovals = 0;
   let disputingAssessors = 0;
   let abstentions = 0;
@@ -184,7 +279,13 @@ export function tallyAssurance(
     ) {
       independentApprovers += 1;
     }
-    if (assessment.assessorKind === 'human') humanApprovals += 1;
+    if (assessment.assessorKind === 'human') {
+      humanApprovals += 1;
+      const exposure = priorExposureOf(assessment);
+      if (exposure === 'none') humanApprovalsWithoutAiExposure += 1;
+      else if (exposure === 'ai_output') humanApprovalsAfterAiExposure += 1;
+      else humanApprovalsWithUnknownExposure += 1;
+    }
     if (assessment.assessorKind === 'agent') agentApprovals += 1;
     for (const capability of assessment.assuranceCapabilities ?? []) {
       approvalCapabilities.add(capability);
@@ -201,6 +302,9 @@ export function tallyAssurance(
     agentApprovals,
     approvalCapabilities: [...approvalCapabilities].sort(),
     humanApprovalCapabilities: [...humanApprovalCapabilities].sort(),
+    humanApprovalsWithoutAiExposure,
+    humanApprovalsAfterAiExposure,
+    humanApprovalsWithUnknownExposure,
     disputingAssessors,
     disputesOpen: (options.disputes ?? []).filter((d) => d.open).length,
     disputesUpheld: (options.disputes ?? []).filter((d) => d.upheld === true).length,
@@ -210,11 +314,15 @@ export function tallyAssurance(
   };
 }
 
-/** Build an `Assessment` from an actor snapshot, carrying its assurance capabilities. */
+/**
+ * Build an `Assessment` from an actor snapshot, carrying its assurance
+ * capabilities. `priorExposure` is the host's record of what it served the
+ * assessor; omitted, the assessment carries none and reads as `unknown`.
+ */
 export function assessmentFromActor(
   actor: ActorSnapshot,
   verdict: AssessmentVerdict,
-  options: { implicit?: boolean } = {},
+  options: { implicit?: boolean; priorExposure?: PriorExposure } = {},
 ): Assessment {
   return {
     assessorRef: actor.actorRef,
@@ -222,6 +330,9 @@ export function assessmentFromActor(
     verdict,
     implicit: options.implicit ?? false,
     assuranceCapabilities: [...actor.assuranceCapabilities],
+    ...(options.priorExposure !== undefined
+      ? { priorExposure: options.priorExposure }
+      : {}),
   };
 }
 

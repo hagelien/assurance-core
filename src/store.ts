@@ -84,6 +84,7 @@ import type {
   AssessmentVerdict,
   DisputeState,
   EvidenceRequirementState,
+  PriorExposure,
 } from './assurance.js';
 import type { PolicyDecision } from './decisions.js';
 import type { RiskProfile } from './risk.js';
@@ -321,6 +322,20 @@ export interface RecordAssessmentInput {
    */
   readonly assuranceCapabilities?: readonly string[];
   /**
+   * Whether the host served the assessor AI output about the proposal before
+   * this verdict — see `PriorExposure`. Server-owned: set from what the host
+   * actually served, never from the assessor's request. Absent reads as
+   * `unknown`.
+   *
+   * A store must not let it fall. If the same assessor already holds an
+   * assessment on this version — standing or superseded — whose exposure
+   * ranks higher, the stored exposure is raised to it (`raisePriorExposure`),
+   * or the write is refused. Otherwise a reviewer who had seen the AI's answer
+   * could record again as `none` and turn an exposed judgment into an
+   * independent one. The conformance suite checks this.
+   */
+  readonly priorExposure?: PriorExposure;
+  /**
    * Set when the assessor is revising: the store supersedes that assessment
    * rather than holding two positions for one reviewer.
    */
@@ -547,6 +562,9 @@ export function toAssessment(stored: StoredAssessment): Assessment {
     implicit: stored.implicit,
     ...(stored.assuranceCapabilities
       ? { assuranceCapabilities: stored.assuranceCapabilities }
+      : {}),
+    ...(stored.priorExposure !== undefined
+      ? { priorExposure: stored.priorExposure }
       : {}),
   };
 }

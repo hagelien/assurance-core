@@ -53,6 +53,7 @@ export const REQUIREMENT_IDS = {
   approvalWithCapability: 'assurance.approvalWithCapability',
   humanApproval: 'assurance.humanApproval',
   humanApprovalWithCapability: 'assurance.humanApprovalWithCapability',
+  independentHumanApproval: 'assurance.independentHumanApproval',
   evidenceRequirementsSatisfied: 'evidence.allSatisfied',
 } as const;
 
@@ -250,6 +251,63 @@ export function humanApprovalWithCapability(capability: string): Requirement {
         : `no human approval carries '${capability}'`,
     }),
   });
+}
+
+/**
+ * At least one approval from a person who judged before seeing AI output
+ * about the proposal: a human approval recorded with `priorExposure: 'none'`.
+ *
+ * Stronger than `humanApproval()`, which a person satisfies by agreeing with
+ * an agent's assessment they had already read. This is for a policy that
+ * means "a human found no problem with no answer in front of them" — say, for
+ * high-risk changes.
+ *
+ * An approval whose exposure is `unknown`, or was never recorded, does not
+ * count: nothing shows it was formed independently. The detail says which
+ * case holds the proposal, so "1 made after viewing AI output" and "1 with
+ * unknown prior exposure" read differently. Like `humanApproval()`, this says
+ * nothing about who the author is; pair it with `independentApprovals` for
+ * that.
+ */
+export function independentHumanApproval(): Requirement {
+  return requirement({
+    id: REQUIREMENT_IDS.independentHumanApproval,
+    params: {},
+    description:
+      'at least one approval from a human who judged before seeing AI output',
+    check: (context) => {
+      const { unexposed, exposed, unknown } = humanApprovalExposure(context);
+      const parts = [
+        `${unexposed} human approval(s) made without prior AI exposure`,
+      ];
+      if (exposed > 0) parts.push(`${exposed} made after viewing AI output`);
+      if (unknown > 0) {
+        parts.push(`${unknown} with unknown prior exposure, counted as exposed`);
+      }
+      return { met: unexposed >= 1, detail: parts.join('; ') };
+    },
+  });
+}
+
+/**
+ * The three exposure counts, read so a profile assembled by hand before they
+ * existed still explains itself. A human approval the profile does not place
+ * in either of the first two counts is reported as of unknown exposure, which
+ * is all such a profile can say about it.
+ */
+function humanApprovalExposure(context: PolicyContext): {
+  unexposed: number;
+  exposed: number;
+  unknown: number;
+} {
+  const a = context.assurance;
+  const unexposed = a.humanApprovalsWithoutAiExposure ?? 0;
+  const exposed = a.humanApprovalsAfterAiExposure ?? 0;
+  const unknown = Math.max(
+    a.humanApprovalsWithUnknownExposure ?? 0,
+    a.humanApprovals - unexposed - exposed,
+  );
+  return { unexposed, exposed, unknown };
 }
 
 /** Every evidence requirement the host declared for this proposal is satisfied. */
