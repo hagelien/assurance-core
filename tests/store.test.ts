@@ -308,6 +308,22 @@ describe('the contract has teeth', () => {
       },
     },
     {
+      what: 'lets a revision lower the AI exposure on record',
+      catchesContaining: 'never downgraded to none',
+      break(store) {
+        // The naive adapter: it writes the exposure the caller passed, with no
+        // regard for what this reviewer had already been shown.
+        const record = store.recordAssessment.bind(store);
+        store.recordAssessment = async (input) => {
+          const stored = await record(input);
+          const row = stored as { priorExposure?: string };
+          if (input.priorExposure === undefined) delete row.priorExposure;
+          else row.priorExposure = input.priorExposure;
+          return stored;
+        };
+      },
+    },
+    {
       what: 'reports timestamps with an offset instead of in UTC',
       catchesContaining: 'come back in UTC',
       break(store) {

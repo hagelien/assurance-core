@@ -521,6 +521,94 @@ const CHECKS: readonly Check[] = [
     },
   },
   {
+    name: 'recorded AI exposure is never downgraded to none',
+    async run(h) {
+      const { store, seed } = h;
+      // A reviewer who saw the AI's answer cannot unsee it. If recording again
+      // could store `none`, re-recording would turn an exposed judgment into
+      // an independent one, and `independentHumanApproval` would count it.
+      //
+      // Only the fall to `none` is checked. A store that keeps no exposure at
+      // all reads every assessment as `unknown`, which no requirement counts
+      // as independent, so it conforms: it can never satisfy that requirement,
+      // but it can never satisfy it falsely either.
+      const { proposalId } = await seed.proposal({
+        target: target(h, 'n1'),
+        author: human('user:1'),
+        createdAt: T0,
+      });
+      const { ref } = await seed.version({ proposalId });
+      const exposure = async (assessorRef: string): Promise<string> => {
+        const standing = (await store.currentAssessments(ref)).filter(
+          (a) => a.assessorRef === assessorRef,
+        );
+        equal(standing.length, 1, `standing assessments for ${assessorRef}`);
+        return standing[0]!.priorExposure ?? 'unknown';
+      };
+      // Refusing the revision is conformance too: the exposed verdict stands.
+      const revise = async (write: () => Promise<unknown>): Promise<void> => {
+        try {
+          await write();
+        } catch {
+          // refused
+        }
+      };
+
+      const seen = await store.recordAssessment({
+        version: ref,
+        assessorRef: 'user:2',
+        assessorKind: 'human',
+        verdict: 'approve',
+        priorExposure: 'ai_output',
+        recordedAt: T0,
+      });
+      truthy(
+        (await exposure('user:2')) !== 'none',
+        'an assessment recorded after AI output reads back as none',
+      );
+      await revise(() =>
+        store.recordAssessment({
+          version: ref,
+          assessorRef: 'user:2',
+          assessorKind: 'human',
+          verdict: 'approve',
+          priorExposure: 'none',
+          supersedesAssessmentId: seen.assessmentId,
+          recordedAt: T1,
+        }),
+      );
+      truthy(
+        (await exposure('user:2')) !== 'none',
+        'a revision recorded as none after AI output was stored as none',
+      );
+
+      // Never recorded is `unknown`, and `unknown` is not `none` either. This
+      // time the assessor records again without naming what it replaces.
+      await store.recordAssessment({
+        version: ref,
+        assessorRef: 'user:3',
+        assessorKind: 'human',
+        verdict: 'abstain',
+        recordedAt: T0,
+      });
+      await revise(() =>
+        store.recordAssessment({
+          version: ref,
+          assessorRef: 'user:3',
+          assessorKind: 'human',
+          verdict: 'approve',
+          priorExposure: 'none',
+          recordedAt: T1,
+        }),
+      );
+      truthy(
+        (await exposure('user:3')) !== 'none',
+        'a revision recorded as none after an assessment of unknown exposure ' +
+          'was stored as none',
+      );
+    },
+  },
+  {
     name: 'assessmentsByActor answers for many versions at once',
     async run(h) {
       const { store, seed } = h;

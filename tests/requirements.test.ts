@@ -13,6 +13,7 @@ import {
   humanApprovalWithCapability,
   independentApprovals,
   independentApprovalsFromPool,
+  independentHumanApproval,
   noDisputingAssessments,
   noOpenDisputes,
   REQUIREMENT_IDS,
@@ -236,6 +237,7 @@ describe('every primitive', () => {
     approvalWithCapability('x'),
     humanApproval(),
     humanApprovalWithCapability('x'),
+    independentHumanApproval(),
     evidenceRequirementsSatisfied(),
   ];
 
